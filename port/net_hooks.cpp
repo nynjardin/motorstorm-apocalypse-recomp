@@ -436,12 +436,26 @@ static void lan_info_publish(uint32_t rec)
     while (at < end && vm_read8(at)) at++;
     if (at + 3 >= end) return;                      /* no room behind the name */
     at++;                                           /* the name's terminator stays */
-    std::string blob(1, (char)0x7F);
-    if (!lan_info_blank(s_info_mode)) blob += s_info_mode;
-    blob.push_back((char)0x1F);
-    if (!lan_info_blank(s_info_track)) blob += s_info_track;
     const size_t room = (size_t)(end - at) - 1;     /* one byte for the terminator */
-    if (blob.size() > room) blob.resize(room);
+    std::string mode = lan_info_blank(s_info_mode) ? std::string() : s_info_mode;
+    std::string track = lan_info_blank(s_info_track) ? std::string() : s_info_track;
+    if (track.size() >= 2 && track.front() == '"' && track.back() == '"') track = track.substr(1, track.size() - 2);
+    /* Too long for the room: the track is cut first, then the mode; a cut name ends with "..",
+     * and never in the middle of a UTF-8 character. */
+    auto cut = [](std::string& t, size_t max) {
+        if (t.size() <= max) return;
+        size_t n = max > 2 ? max - 2 : 0;
+        while (n > 0 && ((uint8_t)t[n] & 0xC0) == 0x80) n--;
+        t.resize(n);
+        if (max >= 2) t += "..";
+    };
+    if (room < 2) return;
+    cut(mode, room - 2);
+    cut(track, room - 2 - mode.size());
+    std::string blob(1, (char)0x7F);
+    blob += mode;
+    blob.push_back((char)0x1F);
+    blob += track;
     bool changed = false;
     for (size_t i = 0; i <= room; i++) {
         const uint8_t want = i < blob.size() ? (uint8_t)blob[i] : 0;
