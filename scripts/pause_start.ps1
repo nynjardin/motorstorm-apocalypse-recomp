@@ -17,7 +17,13 @@ param(
     [int]$Caps = 5,
     [int]$KillUnit = 1,
     [string[]]$KillSpecs = @('0 64'),
-    [hashtable]$Env = @{}
+    [hashtable]$Env = @{},
+    # -Photo: from the pause into the game's photo mode (DOWN, DOWN, X): the camera stays put,
+    # so captures of different frames line up (the pause camera orbits on its own).
+    [switch]$Photo,
+    # -Gates: one more capture per entry, the entry written to the gate file ('fpb=301' = stop
+    # before the first draw of program 0x301, 'fp=301' = after its last one), named gate_NN.
+    [string[]]$Gates = @()
 )
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force $Out | Out-Null
@@ -33,9 +39,9 @@ function Get-Title {
     if (-not $p) { return $null }
     $p.Refresh(); return $p.MainWindowTitle
 }
-function Take-Capture([string]$name) {
+function Take-Capture([string]$name, [string]$content = '0') {
     $before = @(Get-ChildItem $cap -Directory -ErrorAction SilentlyContinue | ForEach-Object Name)
-    Set-Content -Path $gate -Value '0' -NoNewline
+    Set-Content -Path $gate -Value $content -NoNewline
     $new = $null; $t0 = Get-Date
     while (-not $new -and ((Get-Date) - $t0).TotalSeconds -lt 30) {
         Start-Sleep -Milliseconds 500
@@ -65,7 +71,13 @@ Start-Sleep -Milliseconds ([int]($PauseAfter * 1000))
 Set-Content -Path $pad -Value '0x0008 8' -NoNewline           # START: pause
 Start-Sleep 3
 Write-Host "paused: $(Get-Title)"
+if ($Photo) {
+    foreach ($b in '0x0040', '0x0040', '0x4000') { Set-Content -Path $pad -Value "$b 6" -NoNewline; Start-Sleep -Milliseconds 900 }
+    Start-Sleep 3
+    Write-Host "photo mode: $(Get-Title)"
+}
 for ($i = 0; $i -lt $Caps; $i++) { Take-Capture ('off_{0:d2}' -f $i) }
+for ($i = 0; $i -lt $Gates.Count; $i++) { Take-Capture ('gate_{0:d2}' -f $i) $Gates[$i] }
 if ($KillUnit -ge 0) {
     # -KillSpecs: several series, each "<min vertices> <max vertices>" (default: every such draw)
     $k = 0

@@ -1,10 +1,14 @@
-"""vtxdump_decode.py <run.log>
+"""vtxdump_decode.py <run.log> [--consts] [--wide]
 The [VTXDUMP] blocks of a run (VTX_FP_DUMP, VTX_FP_DUMP_FILE, VTX_FP_DUMP_OWN: toolkit patch #64 tools),
 each distinct (program, primitive, count) once, attributes decoded (float, half, bytes).
+With VTX_FP_DUMP_OWN on an indexed draw: "idx:" = its indices, "ia<n>" = the vertices it really
+uses; --consts also prints the vertex program's non-zero constants; --wide does not cut lines.
 System python (numpy).
 """
 import re, sys
 import numpy as np
+consts = '--consts' in sys.argv
+wide = 100000 if '--wide' in sys.argv else 420
 lines = [l.rstrip('\n') for l in open(sys.argv[1], encoding='latin-1') if 'VTXDUMP' in l]
 def dec(t, size, e):
     # RSX vertex types: 1 s16n, 2 float, 3 half, 4 u8n, 5 s16, 6 cmp(11-11-10), 7 u8
@@ -22,10 +26,16 @@ while i < len(lines):
         print('fp=%s prim=%s first=%s count=%s %s frame %s' % m.groups())
         j = i + 1
         while j < len(lines) and 'fp=0x' not in lines[j]:
-            a = re.search(r'attr +(\d+) type (\d+) size (\d+) stride (\d+) offset 0x(\w+) freq (\d+):(.*)', lines[j])
+            # "attr": the array's first elements; "iattr": the vertices the draw indexes (after "idx:")
+            a = re.search(r'(i?)attr +(\d+) type (\d+) size (\d+) stride (\d+) offset 0x(\w+) freq (\d+):(.*)', lines[j])
             if a:
-                t, size = int(a.group(2)), int(a.group(3))
-                elems = [bytes(int(x, 16) for x in e.split()) for e in a.group(7).split('|')[1:]]
-                print('   a%-2s t%d s%d st%-2s off %s:' % (a.group(1), t, size, a.group(4), a.group(5)), ' '.join(str(dec(t, size, e)) for e in elems)[:420])
+                t, size = int(a.group(3)), int(a.group(4))
+                elems = [bytes(int(x, 16) for x in e.split()) for e in a.group(8).split('|')[1:]]
+                print('  %sa%-2s t%d s%d st%-2s off %s:' % (a.group(1) or ' ', a.group(2), t, size, a.group(5), a.group(6)),
+                      ' '.join(str(dec(t, size, e)) for e in elems)[:wide])
+            elif 'idx:' in lines[j]:
+                print('   idx:' + lines[j].split('idx:')[1])
+            elif consts and re.search(r'c\[ *\d+\] =', lines[j]):
+                print('   ' + lines[j].split(']  ', 1)[1])
             j += 1
     i += 1
