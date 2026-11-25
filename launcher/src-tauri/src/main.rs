@@ -23,12 +23,16 @@ use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 const GAME_EXE: &str = "MotorStormApocalypse.exe";
 const DATA: &str = "recomp";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The languages on the disc (BCES00484), as the codes PS3_LANG takes.
+const GAME_LANGS: [&str; 14] = ["en", "fr", "de", "es", "it", "nl", "pt", "sv", "no", "da", "fi", "ko", "pl", "ru"];
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
     /// The launcher's language: "en" (default) or "fr".
     lang: String,
+    /// The game's own language (PS3_LANG): "" = the one of Windows, or one of GAME_LANGS.
+    game_lang: String,
     /// The player's name on the network: 3-16 letters, digits, '-' or '_'.
     pseudo: String,
     /// The title's LAN mode (multiplayer without a server).
@@ -66,6 +70,7 @@ impl Default for Settings {
             .collect();
         Settings {
             lang: "en".into(),
+            game_lang: String::new(),
             pseudo: if user.len() >= 3 { user } else { "Player".into() },
             lan: true,
             net_ip: String::new(),
@@ -139,6 +144,9 @@ impl Settings {
         if !valid_ips(&self.net_ip) || !valid_ips(&self.peers) {
             return Err(tr(fr, "Invalid network address (expected: a.b.c.d).", "Adresse réseau invalide (attendu : a.b.c.d).").into());
         }
+        if !(self.game_lang.is_empty() || GAME_LANGS.contains(&self.game_lang.as_str())) {
+            return Err(format!("{} {}", tr(fr, "Unexpected game language:", "Langue du jeu inattendue :"), self.game_lang));
+        }
         let size_ok = |s: &str| {
             s.split_once('x').is_some_and(|(w, h)| {
                 w.parse::<u32>().is_ok_and(|w| (320..=16384).contains(&w)) && h.parse::<u32>().is_ok_and(|h| (180..=16384).contains(&h))
@@ -165,6 +173,9 @@ impl Settings {
             self.pseudo.clone()
         };
         set("PS3_NP_ONLINE_ID", &pseudo);
+        if !self.game_lang.is_empty() {
+            set("PS3_LANG", &self.game_lang);
+        }
         if self.lan {
             set("PORT_NET_LAN", "1");
             if self.local_test {

@@ -26,6 +26,9 @@ const TEXT = {
     player_title: "Player",
     pseudo: "Player name",
     pseudo_help: "3 to 16 characters: unaccented letters, digits, - or _. This is the name the other players see.",
+    game_lang: "Game language",
+    game_lang_auto: "Automatic (the language of Windows)",
+    game_lang_help: "The language of the game's menus and voices. It applies the next time the game starts.",
     lan_title: "Local network",
     lan: "Multiplayer on the local network (no server)",
     net_ip: "Network card",
@@ -76,6 +79,9 @@ const TEXT = {
     player_title: "Joueur",
     pseudo: "Pseudo",
     pseudo_help: "3 à 16 caractères : lettres sans accent, chiffres, - ou _. C'est le nom que voient les autres joueurs.",
+    game_lang: "Langue du jeu",
+    game_lang_auto: "Automatique (la langue de Windows)",
+    game_lang_help: "La langue des menus et des voix du jeu. Elle s'applique au prochain lancement du jeu.",
     lan_title: "Réseau local",
     lan: "Multijoueur en réseau local (sans serveur)",
     net_ip: "Carte réseau",
@@ -190,6 +196,7 @@ function showButtons() {
 
 function showSettings() {
   $("pseudo").value = settings.pseudo;
+  $("game-lang").value = settings.game_lang;
   $("lan").checked = settings.lan;
   $("peers").value = settings.peers;
   $("fps60").checked = settings.fps60;
@@ -240,6 +247,7 @@ async function refresh() {
 function readPage() {
   settings.lang = $("lang").value;
   settings.pseudo = $("pseudo").value.trim();
+  settings.game_lang = $("game-lang").value;
   settings.lan = $("lan").checked;
   settings.net_ip = $("net-ip").value;
   settings.peers = $("peers").value.trim();
@@ -290,7 +298,7 @@ async function play(instance) {
 }
 
 for (const id of ["pseudo", "peers", "extra"]) $(id).addEventListener("input", saveSoon);
-for (const id of ["lan", "net-ip", "window", "res", "fps30", "fps60", "rsx-async", "spu-async-pool", "geo-cache", "game-log", "local-test"])
+for (const id of ["game-lang", "lan", "net-ip", "window", "res", "fps30", "fps60", "rsx-async", "spu-async-pool", "geo-cache", "game-log", "local-test"])
   $(id).addEventListener("change", saveNow);
 // The language: saved like any setting, then the whole page is shown again (the Rust side
 // answers in the new language too).
