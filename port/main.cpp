@@ -490,8 +490,8 @@ static DWORD WINAPI frame_clock(LPVOID)
      * and DXGI stretches it to the window (the backend has no WM_SIZE / ResizeBuffers): a bigger
      * picture, not a sharper one. The sharper one is PORT_RES; without PORT_WINDOW the window
      * opens at the size of the swap chain. */
-    if (const char* pw = getenv("PORT_WINDOW"); rsx_ok && pw && *pw) {
-        struct Ctx { HWND hwnd; } found = { NULL };
+    struct Ctx { HWND hwnd; } found = { NULL };
+    if (rsx_ok)
         EnumWindows([](HWND h, LPARAM p) -> BOOL {
             DWORD pid = 0; char cls[64] = "";
             GetWindowThreadProcessId(h, &pid);
@@ -500,6 +500,19 @@ static DWORD WINAPI frame_clock(LPVOID)
             }
             return TRUE;
         }, (LPARAM)&found);
+    /* The exe's icon (resource 1, port\app.rc, made from the player's PS3_GAME\ICON0.PNG by
+     * scripts\make_game_icon.ps1; absent from the repository) on the window and the taskbar: the
+     * backend's window class has none. An exe built without app.rc keeps Windows' default. */
+    if (found.hwnd) {
+        const HINSTANCE self = GetModuleHandleA(NULL);
+        HICON icon_big = (HICON)LoadImageA(self, MAKEINTRESOURCEA(1), IMAGE_ICON, GetSystemMetrics(SM_CXICON),
+                                           GetSystemMetrics(SM_CYICON), 0);
+        HICON icon_small = (HICON)LoadImageA(self, MAKEINTRESOURCEA(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                             GetSystemMetrics(SM_CYSMICON), 0);
+        if (icon_big) SendMessageA(found.hwnd, WM_SETICON, ICON_BIG, (LPARAM)icon_big);
+        if (icon_small) SendMessageA(found.hwnd, WM_SETICON, ICON_SMALL, (LPARAM)icon_small);
+    }
+    if (const char* pw = getenv("PORT_WINDOW"); rsx_ok && pw && *pw) {
         int w = 0, h = 0;
         const bool stretch = !_stricmp(pw, "stretch");
         if (found.hwnd && (stretch || !_stricmp(pw, "fullscreen"))) {

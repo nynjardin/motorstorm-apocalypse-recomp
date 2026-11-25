@@ -12,7 +12,8 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# image-png: the window's icon from the game's ICON0.PNG, read at run time.
+tauri = { version = "2", features = ["image-png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

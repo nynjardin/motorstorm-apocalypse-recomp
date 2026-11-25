@@ -32,5 +32,7 @@
 /scripts/gamedata/
 /launcher/src-tauri/gen/
 /launcher/src-tauri/target/
+# The game's own icon (scripts\make_game_icon.ps1, from the player's ICON0.PNG): never published.
+/launcher/src-tauri/icons/game.ico
 /.claude/settings.local.json
 *.pyc

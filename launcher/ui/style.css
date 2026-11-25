@@ -56,6 +56,12 @@ button.ghost:hover:not(:disabled) { color: var(--text); border-color: var(--mute
   background: linear-gradient(160deg, var(--accent), var(--accent-2));
   box-shadow: 0 4px 18px rgba(245, 150, 0, .3);
 }
+/* ICON0.PNG (320x176, the emblem in its middle, transparent sides): full height, centred. */
+.logo.picture {
+  width: 50px; height: 48px; margin: -5px 0;
+  background: center / auto 100% no-repeat; box-shadow: none; border-radius: 0;
+  filter: drop-shadow(0 3px 10px rgba(245, 150, 0, .35));
+}
 .brand { display: flex; flex-direction: column; line-height: 1.2; }
 .brand strong { font-size: 16px; letter-spacing: .3px; }
 .brand span { color: var(--muted); font-size: 12px; }

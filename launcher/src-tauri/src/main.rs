@@ -462,6 +462,53 @@ fn stop(launcher: State<Launcher>, instance: u32) -> Result<(), String> {
     }
 }
 
+/// The game's own picture (PS3_GAME\ICON0.PNG, 320x176): read from the game folder, never
+/// carried in the launcher's sources.
+fn game_png(folder: &Path) -> Option<Vec<u8>> {
+    std::fs::read(folder.join("PS3_GAME").join("ICON0.PNG")).ok()
+}
+
+/// The page's logo: ICON0.PNG as it is (raw bytes, an ArrayBuffer on the page's side).
+#[tauri::command]
+fn game_picture(launcher: State<Launcher>) -> Result<tauri::ipc::Response, String> {
+    game_png(&launcher.folder).map(tauri::ipc::Response::new).ok_or_else(|| "no ICON0.PNG".into())
+}
+
+/// The window's icon: ICON0.PNG's emblem (its opaque pixels) in the smallest square around it,
+/// as scripts\make_game_icon.ps1 makes the exes' icons. None without the file.
+fn window_icon(folder: &Path) -> Option<tauri::image::Image<'static>> {
+    let image = tauri::image::Image::from_bytes(&game_png(folder)?).ok()?;
+    let (w, h, rgba) = (image.width() as usize, image.height() as usize, image.rgba());
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0usize, 0usize);
+    let mut any = false;
+    for y in 0..h {
+        for x in 0..w {
+            if rgba[(y * w + x) * 4 + 3] > 8 {
+                any = true;
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+            }
+        }
+    }
+    if !any {
+        return None;
+    }
+    let side = (x1 - x0 + 1).max(y1 - y0 + 1);
+    // The square's corner in the picture (may be outside it: those pixels stay transparent).
+    let left = (x0 + x1 + 1) as isize / 2 - side as isize / 2;
+    let top = (y0 + y1 + 1) as isize / 2 - side as isize / 2;
+    let mut out = vec![0u8; side * side * 4];
+    for y in 0..side {
+        for x in 0..side {
+            let (sx, sy) = (left + x as isize, top + y as isize);
+            if sx >= 0 && sy >= 0 && (sx as usize) < w && (sy as usize) < h {
+                let s = (sy as usize * w + sx as usize) * 4;
+                out[(y * side + x) * 4..][..4].copy_from_slice(&rgba[s..s + 4]);
+            }
+        }
+    }
+    Some(tauri::image::Image::new_owned(out, side as u32, side as u32))
+}
+
 /// Shows a place of the game folder: "dossier", "sauvegarde", "journal".
 #[tauri::command]
 fn open(launcher: State<Launcher>, what: String) -> Result<(), String> {
@@ -504,7 +551,8 @@ fn main() {
         std::env::temp_dir().join("lanceur-motorstorm-webview")
     };
     let settings = Settings::load(&folder);
-    let title = tr(settings.fr(), "MotorStorm: Apocalypse — Launcher", "MotorStorm: Apocalypse — Lanceur");
+    let icon = window_icon(&folder);
+    let title =tr(settings.fr(), "MotorStorm: Apocalypse — Launcher", "MotorStorm: Apocalypse — Lanceur");
     let launcher = Launcher {
         settings: Mutex::new(settings),
         games: Mutex::new(HashMap::new()),
@@ -512,14 +560,17 @@ fn main() {
     };
     tauri::Builder::default()
         .manage(launcher)
-        .invoke_handler(tauri::generate_handler![state, save, play, stop, open])
+        .invoke_handler(tauri::generate_handler![state, save, play, stop, open, game_picture])
         .setup(move |app| {
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+            let mut window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title(title)
                 .inner_size(900.0, 660.0)
                 .min_inner_size(760.0, 520.0)
-                .data_directory(webview)
-                .build()?;
+                .data_directory(webview);
+            if let Some(icon) = icon {
+                window = window.icon(icon)?;
+            }
+            window.build()?;
             Ok(())
         })
         .run(tauri::generate_context!())

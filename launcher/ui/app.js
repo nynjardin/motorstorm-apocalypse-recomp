@@ -322,5 +322,15 @@ listen("partie", async (event) => {
   message(clean ? t("ended", game, duration(seconds)) : t("stopped", game, duration(seconds), code), !clean);
 });
 
+// The logo: the game's own emblem (PS3_GAME\ICON0.PNG, read from the game folder); "MS" without it.
+invoke("game_picture")
+  .then((bytes) => {
+    const logo = document.querySelector(".logo");
+    logo.style.backgroundImage = `url(${URL.createObjectURL(new Blob([bytes], { type: "image/png" }))})`;
+    logo.textContent = "";
+    logo.classList.add("picture");
+  })
+  .catch(() => {});
+
 document.addEventListener("contextmenu", (e) => e.preventDefault());
 refresh().catch((e) => message(String(e), true));
