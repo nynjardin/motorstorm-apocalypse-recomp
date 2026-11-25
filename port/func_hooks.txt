@@ -7,3 +7,6 @@
 0x003B5948   # "logged into OTG" (byte 0x014D9F66), QueryFormLogic's enter test: 1 in LAN mode
 0x002BD2D8   # XpManager::AddChips(this, chips, player): the local online progression (profile chunk "form"): report, PORT_XP_BONUS
 0x007625C8   # SaveFile::Write (cellSaveDataUserAutoSave): who asks for a profile save (guest call chain, first calls): PORT_SAVE_TRACE
+0x0082E4C8   # Text::SetText(widget, text): the host's off-screen lobby texts "~MSL?~..." (players, mode, track of its LAN game). docs/reseau.md
+0x0054A4D0   # GameSearch screen: fills one row of the LAN games list: then mode (column 1) and track (column 3) from the host's record. docs/reseau.md
+0x00EB3C24   # network library: takes the record of the LAN game this instance hosts (r4): players, mode and track added on the way. docs/reseau.md

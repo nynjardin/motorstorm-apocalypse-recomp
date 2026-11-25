@@ -370,6 +370,185 @@ int port_hook_007625C8(ppu_context* c)
     return 0;
 }
 
+/* ---------------------------------------------------------------------------------------------
+ * What a LAN game is (players, game mode, track), shown in the list of games.
+ *
+ * The record a host announces (name + 0x08, players + 0xCC, maximum + 0xD4) is copied whole to
+ * whoever searches, but in LAN mode the title leaves the player count at 0 and has no field for
+ * the mode or the track (docs/reseau.md). The title hands its record to the network library on
+ * every update of its LAN game: func_00EB3C24(list = r3, record = r4, ...) copies it into the
+ * library's buffer (0x0145DF84), which is what goes out.
+ *
+ * Host: the lobby screen gets four off-screen texts (port/psarc_edits.json,
+ * /ui/fe/wreckreation_racelobby.xml) whose strings the title's own menu engine computes:
+ *   "~MSLC~<players>"   "~MSLM~<game mode name>"   "~MSLT~<track name>"
+ *   "~MSLH~<1 when this player hosts the game>"   (a guest's lobby computes the same texts)
+ * A text widget takes its string through func_0082E4C8(widget = r3, text = r4): the hook below
+ * recognises them by their prefix and keeps what follows.
+ *
+ * The host's port then completes the record on its way to the library (hook on func_00EB3C24,
+ * lan_info_publish): the player count at + 0xCC, and
+ * mode and track in the bytes of the name buffer that follow the name's terminator (the name is
+ * 16 characters at most, the buffer runs to + 0x33): 0x7F, the mode, 0x1F, the track, 0.
+ *
+ * List: func_0054A4D0(screen = r3, table = r4, record = r5, row = r6) fills one row: column 0
+ * the name, column 2 "players/maximum", column 3 a 4-byte string of the record that is always
+ * empty, column 4 an "X"; column 1 is never written. The hook lets it run, then writes the mode
+ * in column 1 and the track in column 3 from those bytes. A table cell is
+ * [[[table + 0x11C] + row * 24 + 0xC] + column * 4] (rows at table + 0xBC, columns at + 0xC0).
+ *   PORT_LAN_INFO=0         none of this (the list as the title fills it)
+ *   PORT_LAN_INFO_TRACE=1   prints what the lobby texts say and what is published (first lines)
+ * ------------------------------------------------------------------------------------------- */
+static const uint32_t LAN_REC_NAME = 0x08, LAN_REC_NAME_END = 0x34, LAN_REC_PLAYERS = 0xCC;
+
+static int lan_info_on(void)
+{
+    static const int v = [] {
+        if (!net_lan()) return 0;
+        const char* e = std::getenv("PORT_LAN_INFO");
+        return (e && e[0] == '0') ? 0 : 1;
+    }();
+    return v;
+}
+
+static int lan_info_trace(void)
+{
+    static const int v = [] { const char* e = std::getenv("PORT_LAN_INFO_TRACE"); return (e && e[0] == '1') ? 1 : 0; }();
+    return v;
+}
+
+static std::mutex  s_info_mu;
+static std::string s_info_mode, s_info_track;       /* this host's game, as its menus name them */
+static int s_info_players = -1, s_info_host = 0;
+
+/* The menus' own placeholders for "nothing yet". */
+static bool lan_info_blank(const std::string& s)
+{
+    return s.empty() || s == "Blank" || s.rfind("No name found", 0) == 0;
+}
+
+/* Called with s_info_mu held: `rec` is the title's record of the game it hosts. */
+static void lan_info_publish(uint32_t rec)
+{
+    if (!s_info_host || rec < 0x10000u || !vm_read8(rec + LAN_REC_NAME)) return;
+    uint32_t at = rec + LAN_REC_NAME;
+    const uint32_t end = rec + LAN_REC_NAME_END;
+    while (at < end && vm_read8(at)) at++;
+    if (at + 3 >= end) return;                      /* no room behind the name */
+    at++;                                           /* the name's terminator stays */
+    std::string blob(1, (char)0x7F);
+    if (!lan_info_blank(s_info_mode)) blob += s_info_mode;
+    blob.push_back((char)0x1F);
+    if (!lan_info_blank(s_info_track)) blob += s_info_track;
+    const size_t room = (size_t)(end - at) - 1;     /* one byte for the terminator */
+    if (blob.size() > room) blob.resize(room);
+    bool changed = false;
+    for (size_t i = 0; i <= room; i++) {
+        const uint8_t want = i < blob.size() ? (uint8_t)blob[i] : 0;
+        if (vm_read8(at + (uint32_t)i) != want) { vm_write8(at + (uint32_t)i, want); changed = true; }
+    }
+    if (s_info_players >= 0 && (int32_t)vm_read32(rec + LAN_REC_PLAYERS) != s_info_players) {
+        vm_write32(rec + LAN_REC_PLAYERS, (uint32_t)s_info_players);
+        changed = true;
+    }
+    static int s_n = 0;
+    if (changed && lan_info_trace() && s_n++ < 32)
+        std::fprintf(stderr, "[port-net] LAN game announced: %d player(s), mode \"%s\", track \"%s\" (%zu bytes of room)\n",
+                     s_info_players, s_info_mode.c_str(), s_info_track.c_str(), room);
+}
+
+int port_hook_0082E4C8(ppu_context* c)
+{
+    if (!lan_info_on()) return 0;
+    const uint32_t text = (uint32_t)c->gpr[4];
+    if (text < 0x10000u || text >= 0xE0000000u) return 0;
+    if (vm_read32(text) != 0x7E4D534Cu) return 0;                   /* "~MSL" */
+    const char kind = (char)vm_read8(text + 4);
+    if (vm_read8(text + 5) != '~') return 0;
+    std::string value;
+    guest_str(text + 6, value, 96);
+    std::lock_guard<std::mutex> g(s_info_mu);
+    if (lan_info_trace()) {                         /* each value once per change, first 64 */
+        static std::unordered_map<char, std::string> s_last;
+        static int s_n = 0;
+        std::string& last = s_last[kind];
+        if (last != value && s_n++ < 64) std::fprintf(stderr, "[port-net] lobby text %c = \"%s\"\n", kind, value.c_str());
+        last = value;
+    }
+    if (kind == 'C') s_info_players = std::atoi(value.c_str());
+    else if (kind == 'M') s_info_mode = value;
+    else if (kind == 'T') s_info_track = value;
+    else if (kind == 'H') s_info_host = (value == "1" || value == "true" || value == "True") ? 1 : 0;
+    return 0;
+}
+
+int port_hook_00EB3C24(ppu_context* c)
+{
+    if (!lan_info_on()) return 0;
+    std::lock_guard<std::mutex> g(s_info_mu);
+    lan_info_publish((uint32_t)c->gpr[4]);
+    return 0;
+}
+
+static void lan_cell_text(ppu_context* c, uint32_t table, uint32_t row, uint32_t col, const std::string& s)
+{
+    if (row >= vm_read32(table + 0xBC) || col >= vm_read32(table + 0xC0)) return;
+    const uint32_t rows = vm_read32(table + 0x11C);
+    const uint32_t cells = rows ? vm_read32(rows + row * 24u + 0xC) : 0;
+    const uint32_t cell = cells ? vm_read32(cells + col * 4u) : 0;
+    if (cell < 0x10000u) return;
+    /* The text goes through guest memory: a scratch frame below the caller's stack pointer. */
+    const ppu_context saved = *c;
+    const uint32_t sp = ((uint32_t)saved.gpr[1] - 0x200u) & ~0xFu;
+    const uint32_t buf = sp + 0x80u;
+    const size_t n = s.size() < 100 ? s.size() : 100;
+    for (size_t i = 0; i < n; i++) vm_write8(buf + (uint32_t)i, (uint8_t)s[i]);
+    vm_write8(buf + (uint32_t)n, 0);
+    vm_write64(sp, saved.gpr[1]);                   /* back chain */
+    c->gpr[1] = sp; c->gpr[3] = cell; c->gpr[4] = buf; c->lr = 0;
+    guest_call(func_0082E4C8, c);
+    const uint64_t ra = c->reserve_addr, rv = c->reserve_value;
+    const int rvalid = c->reserve_valid;
+    *c = saved;
+    c->reserve_addr = ra; c->reserve_value = rv; c->reserve_valid = rvalid;
+}
+
+int port_hook_0054A4D0(ppu_context* c)
+{
+    static thread_local int s_inside = 0;
+    if (s_inside || !lan_info_on()) return 0;
+    const uint32_t table = (uint32_t)c->gpr[4], rec = (uint32_t)c->gpr[5], row = (uint32_t)c->gpr[6];
+    const uint64_t lr = c->lr;
+    s_inside = 1;
+    c->lr = 0;
+    guest_call(func_0054A4D0, c);                   /* the title's own row */
+    s_inside = 0;
+    c->lr = lr;
+    if (table < 0x10000u || rec < 0x10000u) return 1;
+    uint32_t at = rec + LAN_REC_NAME;
+    const uint32_t end = rec + LAN_REC_NAME_END;
+    while (at < end && vm_read8(at)) at++;
+    at++;
+    std::string mode, track;
+    if (at < end && vm_read8(at) == 0x7F) {
+        std::string* into = &mode;
+        for (at++; at < end; at++) {
+            const uint8_t ch = vm_read8(at);
+            if (!ch) break;
+            if (ch == 0x1F) { into = &track; continue; }
+            into->push_back((char)ch);
+        }
+    }
+    lan_cell_text(c, table, row, 1, mode);
+    lan_cell_text(c, table, row, 3, track);
+    lan_cell_text(c, table, row, 4, "");            /* the developers' "X" */
+    static std::atomic<int> s_n{0};
+    if (lan_info_trace() && s_n.fetch_add(1) < 16)
+        std::fprintf(stderr, "[port-net] list row %u: mode \"%s\", track \"%s\", %d player(s)\n", row, mode.c_str(),
+                     track.c_str(), (int32_t)vm_read32(rec + LAN_REC_PLAYERS));
+    return 1;
+}
+
 /* Called on every vblank (main.cpp). The "logged into OTG" byte is also read in line by other
  * logic (JoinGameLogic: func_0039D6C8, whose PostStats step after a race then neither succeeds
  * nor fails: "Quitting the race!!! because im stuck???" and both players leave the game instead
