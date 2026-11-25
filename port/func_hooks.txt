@@ -1,0 +1,9 @@
+# Guest functions that get an entry hook (scripts/func_hooks.py; hooks defined in port/net_hooks.cpp).
+# Redo `python scripts/func_hooks.py` after any PPU relift, then rebuild.
+0x00B229CC   # the title's debug printf (empty stub in retail, 4156 call sites): PORT_GAME_LOG
+0x0038A8D0   # NetGlobalData::SetLanOrWan(this, value): 0 = LAN, 1 = Internet (Medius). docs/reseau.md
+0x002EC270   # CommunityAction::Succeeded(this): succeeded or failed in LAN mode (no OTG server). docs/reseau.md
+0x002EC280   # CommunityAction::HasError(this): 0 in LAN mode: PORT_LAN_OTG_OK
+0x003B5948   # "logged into OTG" (byte 0x014D9F66), QueryFormLogic's enter test: 1 in LAN mode
+0x002BD2D8   # XpManager::AddChips(this, chips, player): the local online progression (profile chunk "form"): report, PORT_XP_BONUS
+0x007625C8   # SaveFile::Write (cellSaveDataUserAutoSave): who asks for a profile save (guest call chain, first calls): PORT_SAVE_TRACE

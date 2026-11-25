@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MotorStorm: Apocalypse — Lanceur</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="logo">MS</div>
+    <div class="brand">
+      <strong>MotorStorm: Apocalypse</strong>
+      <span>Version PC — lanceur <span id="launcher-version"></span></span>
+    </div>
+    <div class="playtime" id="playtime"></div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <h2>Le dossier du jeu</h2>
+      <ul class="checks" id="checks"></ul>
+      <p class="folder" id="folder"></p>
+      <div class="side-buttons">
+        <button class="ghost" data-open="dossier">Dossier</button>
+        <button class="ghost" data-open="sauvegarde" title="recomp\save : la sauvegarde du jeu">Sauvegarde</button>
+        <button class="ghost" data-open="journal" title="recomp\run.log : ce que le jeu a écrit à son dernier lancement">Journal</button>
+      </div>
+    </aside>
+
+    <main class="detail">
+      <section class="card">
+        <h2>Joueur</h2>
+        <label class="field">
+          <span>Pseudo</span>
+          <input type="text" id="pseudo" maxlength="16" spellcheck="false" autocomplete="off">
+          <small>3 à 16 caractères : lettres sans accent, chiffres, - ou _. C'est le nom que voient les autres joueurs.</small>
+        </label>
+      </section>
+
+      <section class="card">
+        <h2>Réseau local</h2>
+        <label class="check"><input type="checkbox" id="lan"> <span>Multijoueur en réseau local (sans serveur)</span></label>
+        <div id="lan-box">
+          <label class="field">
+            <span>Carte réseau</span>
+            <select id="net-ip"></select>
+            <small>Tous les PC doivent être sur le même réseau. Un réseau virtuel (ZeroTier, Radmin VPN) = jouer par Internet.</small>
+          </label>
+          <label class="field">
+            <span>Adresses des autres PC <em>(facultatif)</em></span>
+            <input type="text" id="peers" spellcheck="false" autocomplete="off" placeholder="ex. 192.168.1.20, 192.168.1.21">
+            <small>Seulement si les parties des autres n'apparaissent pas dans « Trouver une partie » (réseau sans diffusion).</small>
+          </label>
+          <p class="hint">En jeu : <b>Pour le fun → Multijoueur → Partie privée</b> pour héberger, <b>Trouver une partie</b> pour rejoindre. Pare-feu : UDP 3658 et 3659.</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Image</h2>
+        <label class="field" style="margin: 0 0 10px">
+          <span>Résolution de l'image</span>
+          <select id="res">
+            <option value="">1280 × 720 (HD, comme sur PS3)</option>
+            <option value="1920x1080">1920 × 1080 (Full HD)</option>
+            <option value="2560x1440">2560 × 1440 (QHD)</option>
+            <option value="3840x2160">3840 × 2160 (4K)</option>
+          </select>
+          <small>La taille à laquelle le jeu calcule son image : plus elle est grande, plus l'image est fine (et plus la carte graphique travaille).</small>
+        </label>
+        <label class="field" style="margin: 0 0 10px">
+          <span>Fenêtre du jeu</span>
+          <select id="window">
+            <option value="">Fenêtre à la taille de l'image</option>
+            <option value="fullscreen">Plein écran (sans bordure)</option>
+          </select>
+          <small>En plein écran l'image garde ses proportions (16:9) : bandes noires sur les côtés d'un écran plus large.</small>
+        </label>
+        <label class="check"><input type="radio" name="fps" id="fps30" value="30"> <span>30 images par seconde (comme sur PS3)</span></label>
+        <label class="check"><input type="radio" name="fps" id="fps60" value="60"> <span>Jusqu'à 60 images par seconde <em>(expérimental)</em></span></label>
+      </section>
+
+      <details class="card" id="advanced">
+        <summary>Dépannage</summary>
+        <label class="check"><input type="checkbox" id="rsx-async"> <span>Rendu sur un thread à part <em>(décocher en cas de gel ou de défaut d'image)</em></span></label>
+        <label class="check"><input type="checkbox" id="spu-async-pool"> <span>Tâches SPU en parallèle <em>(décocher en cas de gel)</em></span></label>
+        <label class="check"><input type="checkbox" id="geo-cache"> <span>Cache de géométrie <em>(décocher si des objets manquent)</em></span></label>
+        <label class="check"><input type="checkbox" id="game-log"> <span>Messages de débogage du jeu dans le journal</span></label>
+        <label class="check"><input type="checkbox" id="local-test"> <span>Test à deux sur ce PC <em>(deux jeux, chacun sa sauvegarde ; pas pour jouer entre PC)</em></span></label>
+        <label class="field">
+          <span>Variables supplémentaires <em>(une par ligne : NOM=valeur)</em></span>
+          <textarea id="extra" rows="3" spellcheck="false"></textarea>
+        </label>
+      </details>
+    </main>
+  </div>
+
+  <footer class="bottombar">
+    <div class="message" id="message"></div>
+    <button class="ghost" id="stop" hidden>Arrêter le jeu</button>
+    <button class="ghost" id="play2" hidden>▶ Joueur 2</button>
+    <button class="play" id="play">▶ Jouer</button>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

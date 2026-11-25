@@ -1,0 +1,56 @@
+[
+  {
+    "file": "/ui/fe/multiplayer.xml",
+    "strip_comments": true,
+    "replace": [
+      [
+        "<Entry lams=\"Wreckreation::FindGameCaps\" value=\"Matchmaking\" />",
+        "<Entry lams=\"Wreckreation::FindGameCaps\" value=\"Game Browser (Dev)\" />"
+      ],
+      [
+        "value=\"$IfInt(OTGConnectionLogic/Connected==false,1,  IfInt(OTG/PartyJoined==true and OTG/PartyLeader==false,3,0))\"",
+        "value=\"$IfInt(OTG/PartyJoined==true and OTG/PartyLeader==false,3,0)\""
+      ],
+      [
+        "<Text name=\"Title\" macro=\"header\" string=\"MATCHMAKING : Game Browser\" />",
+        "<Text name=\"Title\" macro=\"header\" lams=\"Wreckreation::FindGameCaps\" />"
+      ]
+    ]
+  },
+  {
+    "file": "/ui/fe/wreckreation_results.xml",
+    "strip_comments": true,
+    "replace": [
+      [
+        "<Event screen=\"XPAccumulator\" message=\"AddBonusPot\" />",
+        "<Event screen=\"XPAccumulator\" message=\"AddBonusPot\" /><DataBinding databinding=\"UserManager/NeedSave\" value=\"true\" />"
+      ],
+      [
+        "<Event screen=\"SplitScreenXPResults\" message=\"AddBonusPot0\" />",
+        "<Event screen=\"SplitScreenXPResults\" message=\"AddBonusPot0\" /><DataBinding databinding=\"UserManager/NeedSave\" value=\"true\" />"
+      ],
+      [
+        "<Event screen=\"SplitScreenXPResults\" message=\"AddBonusPot1\" />",
+        "<Event screen=\"SplitScreenXPResults\" message=\"AddBonusPot1\" /><DataBinding databinding=\"UserManager/NeedSave\" value=\"true\" />"
+      ],
+      [
+        "<Event screen=\"SplitScreenXPResults\" message=\"AddBonusPot2\" />",
+        "<Event screen=\"SplitScreenXPResults\" message=\"AddBonusPot2\" /><DataBinding databinding=\"UserManager/NeedSave\" value=\"true\" />"
+      ],
+      [
+        "<Event screen=\"SplitScreenXPResults\" message=\"AddBonusPot3\" />",
+        "<Event screen=\"SplitScreenXPResults\" message=\"AddBonusPot3\" /><DataBinding databinding=\"UserManager/NeedSave\" value=\"true\" />"
+      ]
+    ]
+  },
+  {
+    "file": "/ui/be/hud_definition.xml",
+    "strip_comments": true,
+    "replace": [
+      [
+        "<DataBinding databinding=\"JoinGameLogic/PostStats/Execute\" value=\"true\" />",
+        "<DataBinding databinding=\"RaceResultsLogic/StatsPosted\" value=\"true\" />"
+      ]
+    ]
+  }
+]

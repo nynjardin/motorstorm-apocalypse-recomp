@@ -1,0 +1,35 @@
+# MotorStorm recompilation: what this repository holds is OUR work only (scripts, the
+# port's and the launcher's sources, the toolkit's local patches). The game, the firmware and
+# everything derived from them (decrypted EBOOT, lifted code, SPU images, extracted or patched
+# game files, the built exe) never enter it. So: everything is ignored unless listed here.
+# The working notes (docs\, CLAUDE.md) stay local too: the repository is public.
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/LICENSE
+!/scripts/
+!/port/
+!/launcher/
+!/toolkit/
+!/.claude/
+
+# port\: hand-written sources and build / run scripts only.
+# Not: spu\ and spu_ms_overlays.c (lifted SPU code), psarc_patches.bin (game menu files,
+# rebuilt by scripts\psarc_patch.py from psarc_edits.json), build\, gamedata*\ (saves), logs.
+/port/*
+!/port/*.cpp
+!/port/*.bat
+!/port/CMakeLists.txt
+!/port/README.md
+!/port/config.toml
+!/port/func_hooks.txt
+!/port/psarc_edits.json
+!/port/duck_fp.hlsl
+
+/scripts/__pycache__/
+/scripts/gamedata/
+/launcher/src-tauri/gen/
+/launcher/src-tauri/target/
+/.claude/settings.local.json
+*.pyc

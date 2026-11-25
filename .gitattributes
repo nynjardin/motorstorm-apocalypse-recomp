@@ -1,0 +1,5 @@
+# Every file is stored byte for byte, with no line-ending conversion.
+# toolkit\ps3recomp_local.diff must stay exact (`git apply` refuses a diff whose line endings
+# were rewritten), and the .bat / .ps1 files are only ever used on Windows.
+* -text
+*.ico binary
