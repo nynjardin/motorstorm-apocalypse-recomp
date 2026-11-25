@@ -27,6 +27,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
+    /// The launcher's language: "en" (default) or "fr".
+    lang: String,
     /// The player's name on the network: 3-16 letters, digits, '-' or '_'.
     pseudo: String,
     /// The title's LAN mode (multiplayer without a server).
@@ -63,7 +65,8 @@ impl Default for Settings {
             .take(16)
             .collect();
         Settings {
-            pseudo: if user.len() >= 3 { user } else { "Pilote".into() },
+            lang: "en".into(),
+            pseudo: if user.len() >= 3 { user } else { "Player".into() },
             lan: true,
             net_ip: String::new(),
             peers: String::new(),
@@ -90,7 +93,16 @@ fn valid_ips(list: &str) -> bool {
     list.split(',').map(str::trim).filter(|s| !s.is_empty()).all(|s| s.parse::<std::net::Ipv4Addr>().is_ok())
 }
 
+/// One of the two texts of a message: English unless the launcher is set to French.
+fn tr<'a>(fr: bool, english: &'a str, french: &'a str) -> &'a str {
+    if fr { french } else { english }
+}
+
 impl Settings {
+    fn fr(&self) -> bool {
+        self.lang == "fr"
+    }
+
     fn load(folder: &Path) -> Settings {
         std::fs::read_to_string(folder.join(DATA).join("lanceur.json"))
             .ok()
@@ -114,11 +126,18 @@ impl Settings {
     }
 
     fn check(&self) -> Result<(), String> {
+        let fr = self.fr();
+        // The page marks the name field when the message starts with its label ("Player name" / "Pseudo").
         if !valid_pseudo(&self.pseudo) {
-            return Err("Pseudo : 3 à 16 caractères, lettres sans accent, chiffres, - ou _.".into());
+            return Err(tr(
+                fr,
+                "Player name: 3 to 16 characters, unaccented letters, digits, - or _.",
+                "Pseudo : 3 à 16 caractères, lettres sans accent, chiffres, - ou _.",
+            )
+            .into());
         }
         if !valid_ips(&self.net_ip) || !valid_ips(&self.peers) {
-            return Err("Adresse réseau invalide (attendu : a.b.c.d).".into());
+            return Err(tr(fr, "Invalid network address (expected: a.b.c.d).", "Adresse réseau invalide (attendu : a.b.c.d).").into());
         }
         let size_ok = |s: &str| {
             s.split_once('x').is_some_and(|(w, h)| {
@@ -126,10 +145,10 @@ impl Settings {
             })
         };
         if !(self.res.is_empty() || size_ok(&self.res)) {
-            return Err(format!("Résolution inattendue : {}", self.res));
+            return Err(format!("{} {}", tr(fr, "Unexpected resolution:", "Résolution inattendue :"), self.res));
         }
         if !(self.window.is_empty() || self.window == "fullscreen" || size_ok(&self.window)) {
-            return Err(format!("Taille de fenêtre inattendue : {}", self.window));
+            return Err(format!("{} {}", tr(fr, "Unexpected window size:", "Taille de fenêtre inattendue :"), self.window));
         }
         Ok(())
     }
@@ -266,7 +285,7 @@ fn addresses() -> Vec<String> {
     out
 }
 
-fn checks(folder: &Path) -> Vec<Check> {
+fn checks(folder: &Path, fr: bool) -> Vec<Check> {
     let data = folder.join(DATA);
     let has = |p: PathBuf| p.exists();
     let mut list = Vec::new();
@@ -276,35 +295,51 @@ fn checks(folder: &Path) -> Vec<Check> {
     add(
         has(folder.join("PS3_GAME").join("USRDIR").join("ms3.psarc")),
         true,
-        "Le jeu (PS3_GAME)",
-        "Le lanceur doit être à la racine du dossier du jeu, à côté de PS3_GAME.",
+        tr(fr, "The game (PS3_GAME)", "Le jeu (PS3_GAME)"),
+        tr(
+            fr,
+            "The launcher must be at the root of the game folder, beside PS3_GAME.",
+            "Le lanceur doit être à la racine du dossier du jeu, à côté de PS3_GAME.",
+        ),
     );
-    add(has(folder.join(GAME_EXE)), true, GAME_EXE, "À poser à côté du lanceur.");
+    add(has(folder.join(GAME_EXE)), true, GAME_EXE, tr(fr, "Put it beside the launcher.", "À poser à côté du lanceur."));
     add(
         has(data.join("EBOOT.elf")),
         true,
         "recomp\\EBOOT.elf",
-        "L'exécutable du jeu déchiffré : rpcs3.exe --decrypt PS3_GAME\\USRDIR\\EBOOT.BIN, puis le copier ici.",
+        tr(
+            fr,
+            "The game's decrypted executable: rpcs3.exe --decrypt PS3_GAME\\USRDIR\\EBOOT.BIN, then copy it here.",
+            "L'exécutable du jeu déchiffré : rpcs3.exe --decrypt PS3_GAME\\USRDIR\\EBOOT.BIN, puis le copier ici.",
+        ),
     );
     add(
         has(data.join("psarc_patches.bin")),
         false,
         "recomp\\psarc_patches.bin",
-        "Sans lui : « Trouver une partie » reste grisé, retour au menu après une course en réseau.",
+        tr(
+            fr,
+            "Without it: the game search stays greyed out, and a network race ends back at the menu.",
+            "Sans lui : « Trouver une partie » reste grisé, retour au menu après une course en réseau.",
+        ),
     );
     add(
         has(data.join("dev_flash")),
         false,
         "recomp\\dev_flash",
-        "Fichiers du firmware (dev_flash de RPCS3) : sans eux, pas de musique MP3.",
+        tr(
+            fr,
+            "Firmware files (RPCS3's dev_flash): without them, no MP3 music.",
+            "Fichiers du firmware (dev_flash de RPCS3) : sans eux, pas de musique MP3.",
+        ),
     );
-    add(has(data.join("libsre_image.bin")), false, "recomp\\libsre_image.bin", "Optionnel.");
+    add(has(data.join("libsre_image.bin")), false, "recomp\\libsre_image.bin", tr(fr, "Optional.", "Optionnel."));
     list
 }
 
 #[tauri::command]
 fn state(launcher: State<Launcher>) -> LauncherState {
-    let checks = checks(&launcher.folder);
+    let checks = checks(&launcher.folder, launcher.settings.lock().unwrap().fr());
     let mut running: Vec<u32> = launcher.games.lock().unwrap().keys().copied().collect();
     running.sort();
     LauncherState {
@@ -336,16 +371,22 @@ fn save(launcher: State<Launcher>, settings: Settings) -> Result<(), String> {
 /// ends, a "partie" event tells the page.
 #[tauri::command]
 fn play(app: tauri::AppHandle, launcher: State<Launcher>, instance: u32) -> Result<(), String> {
-    if let Some(c) = checks(&launcher.folder).iter().find(|c| c.needed && !c.ok) {
-        return Err(format!("{} : {}", c.name, c.detail));
-    }
     let settings = launcher.settings.lock().unwrap().clone();
+    let fr = settings.fr();
+    if let Some(c) = checks(&launcher.folder, fr).iter().find(|c| c.needed && !c.ok) {
+        return Err(format!("{}{} {}", c.name, tr(fr, ":", " :"), c.detail));
+    }
     settings.check()?;
     if instance >= 2 && !(settings.lan && settings.local_test) {
-        return Err("Le deuxième jeu sert au test à deux sur ce PC (à cocher dans Dépannage).".into());
+        return Err(tr(
+            fr,
+            "The second game is for the two-player test on this PC (tick it under Troubleshooting).",
+            "Le deuxième jeu sert au test à deux sur ce PC (à cocher dans Dépannage).",
+        )
+        .into());
     }
     if launcher.games.lock().unwrap().contains_key(&instance) {
-        return Err("Ce jeu tourne déjà.".into());
+        return Err(tr(fr, "This game is already running.", "Ce jeu tourne déjà.").into());
     }
     settings.save(&launcher.folder)?;
     // The game's log: its stdout and stderr, as port\run.bat's redirection. Opened here (shared:
@@ -414,6 +455,7 @@ fn stop(launcher: State<Launcher>, instance: u32) -> Result<(), String> {
 #[tauri::command]
 fn open(launcher: State<Launcher>, what: String) -> Result<(), String> {
     let data = launcher.folder.join(DATA);
+    let fr = launcher.settings.lock().unwrap().fr();
     let (program, path) = match what.as_str() {
         "dossier" => ("explorer", launcher.folder.clone()),
         "sauvegarde" => {
@@ -424,11 +466,16 @@ fn open(launcher: State<Launcher>, what: String) -> Result<(), String> {
         "journal" => {
             let log = data.join("run.log");
             if !log.exists() {
-                return Err("Pas encore de journal : le jeu n'a pas été lancé d'ici.".into());
+                return Err(tr(
+                    fr,
+                    "No log yet: the game has not been started from here.",
+                    "Pas encore de journal : le jeu n'a pas été lancé d'ici.",
+                )
+                .into());
             }
             ("notepad", log)
         }
-        _ => return Err(format!("Lieu inconnu : {what}")),
+        _ => return Err(format!("{} {what}", tr(fr, "Unknown place:", "Lieu inconnu :"))),
     };
     Command::new(program).arg(path).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
@@ -445,8 +492,10 @@ fn main() {
     } else {
         std::env::temp_dir().join("lanceur-motorstorm-webview")
     };
+    let settings = Settings::load(&folder);
+    let title = tr(settings.fr(), "MotorStorm: Apocalypse — Launcher", "MotorStorm: Apocalypse — Lanceur");
     let launcher = Launcher {
-        settings: Mutex::new(Settings::load(&folder)),
+        settings: Mutex::new(settings),
         games: Mutex::new(HashMap::new()),
         folder,
     };
@@ -455,7 +504,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![state, save, play, stop, open])
         .setup(move |app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title("MotorStorm: Apocalypse — Lanceur")
+                .title(title)
                 .inner_size(900.0, 660.0)
                 .min_inner_size(760.0, 520.0)
                 .data_directory(webview)

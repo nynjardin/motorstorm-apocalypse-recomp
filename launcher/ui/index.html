@@ -1,94 +1,100 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MotorStorm: Apocalypse — Lanceur</title>
+  <title>MotorStorm: Apocalypse — Launcher</title>
   <link rel="stylesheet" href="style.css">
 </head>
+<!-- The text in this page is the English one; app.js replaces every element that carries a
+     data-i18n* attribute with the text of the chosen language (its TEXT table). -->
 <body>
   <header class="topbar">
     <div class="logo">MS</div>
     <div class="brand">
       <strong>MotorStorm: Apocalypse</strong>
-      <span>Version PC — lanceur <span id="launcher-version"></span></span>
+      <span><span data-i18n="brand">PC version — launcher</span> <span id="launcher-version"></span></span>
     </div>
     <div class="playtime" id="playtime"></div>
+    <select id="lang" class="lang" title="Language / Langue">
+      <option value="en">English</option>
+      <option value="fr">Français</option>
+    </select>
   </header>
 
   <div class="layout">
     <aside class="sidebar">
-      <h2>Le dossier du jeu</h2>
+      <h2 data-i18n="folder_title">The game folder</h2>
       <ul class="checks" id="checks"></ul>
       <p class="folder" id="folder"></p>
       <div class="side-buttons">
-        <button class="ghost" data-open="dossier">Dossier</button>
-        <button class="ghost" data-open="sauvegarde" title="recomp\save : la sauvegarde du jeu">Sauvegarde</button>
-        <button class="ghost" data-open="journal" title="recomp\run.log : ce que le jeu a écrit à son dernier lancement">Journal</button>
+        <button class="ghost" data-open="dossier" data-i18n="open_folder">Folder</button>
+        <button class="ghost" data-open="sauvegarde" data-i18n="open_save" data-i18n-title="open_save_tip" title="recomp\save: the game's save">Save</button>
+        <button class="ghost" data-open="journal" data-i18n="open_log" data-i18n-title="open_log_tip" title="recomp\run.log: what the game wrote the last time it ran">Log</button>
       </div>
     </aside>
 
     <main class="detail">
       <section class="card">
-        <h2>Joueur</h2>
+        <h2 data-i18n="player_title">Player</h2>
         <label class="field">
-          <span>Pseudo</span>
+          <span data-i18n="pseudo">Player name</span>
           <input type="text" id="pseudo" maxlength="16" spellcheck="false" autocomplete="off">
-          <small>3 à 16 caractères : lettres sans accent, chiffres, - ou _. C'est le nom que voient les autres joueurs.</small>
+          <small data-i18n="pseudo_help">3 to 16 characters: unaccented letters, digits, - or _. This is the name the other players see.</small>
         </label>
       </section>
 
       <section class="card">
-        <h2>Réseau local</h2>
-        <label class="check"><input type="checkbox" id="lan"> <span>Multijoueur en réseau local (sans serveur)</span></label>
+        <h2 data-i18n="lan_title">Local network</h2>
+        <label class="check"><input type="checkbox" id="lan"> <span data-i18n="lan">Multiplayer on the local network (no server)</span></label>
         <div id="lan-box">
           <label class="field">
-            <span>Carte réseau</span>
+            <span data-i18n="net_ip">Network card</span>
             <select id="net-ip"></select>
-            <small>Tous les PC doivent être sur le même réseau. Un réseau virtuel (ZeroTier, Radmin VPN) = jouer par Internet.</small>
+            <small data-i18n="net_ip_help">Every PC must be on the same network. A virtual network (ZeroTier, Radmin VPN) = playing over the Internet.</small>
           </label>
           <label class="field">
-            <span>Adresses des autres PC <em>(facultatif)</em></span>
-            <input type="text" id="peers" spellcheck="false" autocomplete="off" placeholder="ex. 192.168.1.20, 192.168.1.21">
-            <small>Seulement si les parties des autres n'apparaissent pas dans « Trouver une partie » (réseau sans diffusion).</small>
+            <span data-i18n-html="peers">Addresses of the other PCs <em>(optional)</em></span>
+            <input type="text" id="peers" spellcheck="false" autocomplete="off" data-i18n-placeholder="peers_example" placeholder="e.g. 192.168.1.20, 192.168.1.21">
+            <small data-i18n="peers_help">Only if the others' games do not show up in the game's search (a network without broadcast).</small>
           </label>
-          <p class="hint">En jeu : <b>Pour le fun → Multijoueur → Partie privée</b> pour héberger, <b>Trouver une partie</b> pour rejoindre. Pare-feu : UDP 3658 et 3659.</p>
+          <p class="hint" data-i18n-html="lan_hint">In the game: open the multiplayer menu, then <b>host a private game</b> or <b>search for a game</b> to join. Firewall: UDP 3658 and 3659.</p>
         </div>
       </section>
 
       <section class="card">
-        <h2>Image</h2>
+        <h2 data-i18n="picture_title">Picture</h2>
         <label class="field" style="margin: 0 0 10px">
-          <span>Résolution de l'image</span>
+          <span data-i18n="res">Picture resolution</span>
           <select id="res">
-            <option value="">1280 × 720 (HD, comme sur PS3)</option>
+            <option value="" data-i18n="res_720">1280 × 720 (HD, as on PS3)</option>
             <option value="1920x1080">1920 × 1080 (Full HD)</option>
             <option value="2560x1440">2560 × 1440 (QHD)</option>
             <option value="3840x2160">3840 × 2160 (4K)</option>
           </select>
-          <small>La taille à laquelle le jeu calcule son image : plus elle est grande, plus l'image est fine (et plus la carte graphique travaille).</small>
+          <small data-i18n="res_help">The size the game computes its picture at: the larger, the finer the picture (and the more work for the graphics card).</small>
         </label>
         <label class="field" style="margin: 0 0 10px">
-          <span>Fenêtre du jeu</span>
+          <span data-i18n="window">Game window</span>
           <select id="window">
-            <option value="">Fenêtre à la taille de l'image</option>
-            <option value="fullscreen">Plein écran (sans bordure)</option>
+            <option value="" data-i18n="window_size">A window the size of the picture</option>
+            <option value="fullscreen" data-i18n="window_full">Full screen (borderless)</option>
           </select>
-          <small>En plein écran l'image garde ses proportions (16:9) : bandes noires sur les côtés d'un écran plus large.</small>
+          <small data-i18n="window_help">In full screen the picture keeps its shape (16:9): black bars on the sides of a wider screen.</small>
         </label>
-        <label class="check"><input type="radio" name="fps" id="fps30" value="30"> <span>30 images par seconde (comme sur PS3)</span></label>
-        <label class="check"><input type="radio" name="fps" id="fps60" value="60"> <span>Jusqu'à 60 images par seconde <em>(expérimental)</em></span></label>
+        <label class="check"><input type="radio" name="fps" id="fps30" value="30"> <span data-i18n="fps30">30 frames per second (as on PS3)</span></label>
+        <label class="check"><input type="radio" name="fps" id="fps60" value="60"> <span data-i18n-html="fps60">Up to 60 frames per second <em>(experimental)</em></span></label>
       </section>
 
       <details class="card" id="advanced">
-        <summary>Dépannage</summary>
-        <label class="check"><input type="checkbox" id="rsx-async"> <span>Rendu sur un thread à part <em>(décocher en cas de gel ou de défaut d'image)</em></span></label>
-        <label class="check"><input type="checkbox" id="spu-async-pool"> <span>Tâches SPU en parallèle <em>(décocher en cas de gel)</em></span></label>
-        <label class="check"><input type="checkbox" id="geo-cache"> <span>Cache de géométrie <em>(décocher si des objets manquent)</em></span></label>
-        <label class="check"><input type="checkbox" id="game-log"> <span>Messages de débogage du jeu dans le journal</span></label>
-        <label class="check"><input type="checkbox" id="local-test"> <span>Test à deux sur ce PC <em>(deux jeux, chacun sa sauvegarde ; pas pour jouer entre PC)</em></span></label>
+        <summary data-i18n="trouble_title">Troubleshooting</summary>
+        <label class="check"><input type="checkbox" id="rsx-async"> <span data-i18n-html="rsx_async">Rendering on its own thread <em>(untick after a freeze or a picture defect)</em></span></label>
+        <label class="check"><input type="checkbox" id="spu-async-pool"> <span data-i18n-html="spu_async_pool">SPU tasks in parallel <em>(untick after a freeze)</em></span></label>
+        <label class="check"><input type="checkbox" id="geo-cache"> <span data-i18n-html="geo_cache">Geometry cache <em>(untick if objects are missing)</em></span></label>
+        <label class="check"><input type="checkbox" id="game-log"> <span data-i18n="game_log">The game's debug messages in the log</span></label>
+        <label class="check"><input type="checkbox" id="local-test"> <span data-i18n-html="local_test">Two-player test on this PC <em>(two games, each with its own save; not for playing between PCs)</em></span></label>
         <label class="field">
-          <span>Variables supplémentaires <em>(une par ligne : NOM=valeur)</em></span>
+          <span data-i18n-html="extra">More variables <em>(one per line: NAME=value)</em></span>
           <textarea id="extra" rows="3" spellcheck="false"></textarea>
         </label>
       </details>
@@ -97,9 +103,9 @@
 
   <footer class="bottombar">
     <div class="message" id="message"></div>
-    <button class="ghost" id="stop" hidden>Arrêter le jeu</button>
-    <button class="ghost" id="play2" hidden>▶ Joueur 2</button>
-    <button class="play" id="play">▶ Jouer</button>
+    <button class="ghost" id="stop" data-i18n="stop" hidden>Stop the game</button>
+    <button class="ghost" id="play2" data-i18n="play2" hidden>▶ Player 2</button>
+    <button class="play" id="play">▶ Play</button>
   </footer>
 
   <script src="app.js"></script>

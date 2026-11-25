@@ -124,11 +124,19 @@ struct Portable {
         const std::string data = root + "\\recomp";
 
         if (!exists(root + "\\PS3_GAME\\USRDIR\\ms3.psarc"))
-            fail(L"Le jeu est introuvable.\n\nMotorStormApocalypse.exe doit être posé à la racine du "
+            /* Both languages, English first: the launcher's language setting is not read yet. */
+            fail(L"The game was not found.\n\nMotorStormApocalypse.exe must be at the root of the "
+                 L"game folder, beside the PS3_GAME folder (MotorStorm: Apocalypse, BCES00484).\n\n"
+                 L"————\n\n"
+                 L"Le jeu est introuvable.\n\nMotorStormApocalypse.exe doit être posé à la racine du "
                  L"dossier du jeu, à côté du dossier PS3_GAME (MotorStorm: Apocalypse, BCES00484).");
         g_elf = data + "\\EBOOT.elf";
         if (!exists(g_elf))
-            fail(L"recomp\\EBOOT.elf est introuvable.\n\nC'est l'exécutable du jeu déchiffré : "
+            fail(L"recomp\\EBOOT.elf was not found.\n\nIt is the game's decrypted executable: "
+                 L"rpcs3.exe --decrypt PS3_GAME\\USRDIR\\EBOOT.BIN, then copy the resulting file "
+                 L"as recomp\\EBOOT.elf.\n\n"
+                 L"————\n\n"
+                 L"recomp\\EBOOT.elf est introuvable.\n\nC'est l'exécutable du jeu déchiffré : "
                  L"rpcs3.exe --decrypt PS3_GAME\\USRDIR\\EBOOT.BIN, puis copier le fichier obtenu "
                  L"sous le nom recomp\\EBOOT.elf.");
 

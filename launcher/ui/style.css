@@ -112,6 +112,7 @@ input[type=text], select, textarea {
   user-select: text;
   max-width: 420px;
 }
+select.lang { margin-left: 14px; padding: 5px 8px; font-size: 12px; }
 textarea { max-width: none; resize: vertical; font-family: Consolas, monospace; font-size: 13px; }
 input[type=text]:focus, select:focus, textarea:focus { border-color: var(--accent); }
 input.invalid { border-color: var(--bad); }
