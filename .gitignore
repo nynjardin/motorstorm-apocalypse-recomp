@@ -8,6 +8,7 @@
 !/.gitattributes
 !/README.md
 !/LICENSE
+!/assets/
 !/scripts/
 !/port/
 !/launcher/

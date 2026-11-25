@@ -1,87 +1,92 @@
-# MotorStorm: Apocalypse sur PC, par recompilation statique
+<p align="center">
+  <img src="assets/logo.png" alt="MotorStorm: Apocalypse" width="512">
+</p>
 
-Portage natif Windows de **MotorStorm: Apocalypse** (PS3, BCES00484 v02.00) : le code PowerPC
-du jeu est traduit en C++ avec [ps3recomp](https://github.com/sp00nznet/ps3recomp), puis
-compilé avec un runtime qui remplace la console (Direct3D 12, son, manette, réseau local).
+# MotorStorm: Apocalypse on PC, by static recompilation
 
-**Ce dépôt ne contient ni le jeu ni le firmware.** Il ne contient que notre travail : les
-sources du port, le lanceur, les scripts et nos modifications de ps3recomp.
-Il faut son propre disque du jeu et le firmware de sa propre console pour s'en servir.
+A native Windows port of **MotorStorm: Apocalypse** (PS3, BCES00484 v02.00). The game's PowerPC
+code is translated to C++ with [ps3recomp](https://github.com/sp00nznet/ps3recomp), then compiled
+with a runtime that stands in for the console (Direct3D 12, sound, controller, local network).
 
-## État (25 novembre 2026)
+**This repository contains neither the game nor the firmware.** It only holds our own work: the
+port's sources, the launcher, the scripts and our changes to ps3recomp. You need your own disc of
+the game and the firmware of your own console to use it.
 
-- Le jeu démarre, les menus fonctionnent, les courses vont au bout avec un rendu correct sur
-  les deux circuits essayés (« Un pont vers nulle part », « Quai sous pression »).
-- 30 images par seconde tenues (le plafond du jeu) sur un i7-10700F et une RTX 4070 SUPER.
-- Rendu en 720p par défaut, vrai 1080p et 1440p possibles (`PORT_RES=1920x1080`).
-- Son et musique en place. Les films sont remplacés par un clip court.
-- Multijoueur en réseau local sans serveur, avec le mode LAN que le jeu contient déjà ;
-  essayé à deux et trois instances sur une même machine, pas encore entre deux PC.
-- Défaut connu : des carrés sombres autour des véhicules.
+## Status (25 November 2026)
 
-## Ce qu'il y a dans le dépôt
+- The game boots, the menus work, and races run to the end with a correct picture on the two
+  tracks tried so far (the bridge and the pier).
+- A steady 30 frames per second (the game's own cap) on an i7-10700F and an RTX 4070 SUPER.
+- Renders at 720p by default; true 1080p and 1440p are available (`PORT_RES=1920x1080`).
+- Sound and music work. Movies are replaced by a short clip.
+- Multiplayer on a local network with no server, using the LAN mode the game already contains;
+  tried with two and three instances on one machine, not yet between two PCs.
+- Known defect: dark squares around the vehicles.
 
-| Dossier | Contenu |
+## What is in the repository
+
+| Folder | Contents |
 |---|---|
-| [port/](port/) | le projet CMake du port : `main.cpp`, réponses aux bibliothèques de la console (`hle_overrides.cpp`), réseau (`net_hooks.cpp`), scripts de compilation et de lancement |
-| [launcher/](launcher/) | `Lanceur.exe` (Tauri 2) : réglages, parties LAN, lancement du jeu depuis son dossier |
-| [scripts/](scripts/) | traduction du jeu (`lift_title.py`), mesures, captures, outils de débogage ; chaque script dit ce qu'il fait dans son en-tête |
-| [toolkit/](toolkit/) | nos modifications de ps3recomp : un diff à appliquer sur le commit noté dans `BASE.txt`, plus les fichiers ajoutés |
+| [port/](port/) | the port's CMake project: `main.cpp`, answers to the console's libraries (`hle_overrides.cpp`), network (`net_hooks.cpp`), build and run scripts |
+| [launcher/](launcher/) | `Lanceur.exe` (Tauri 2): settings, LAN games, starting the game from its own folder |
+| [scripts/](scripts/) | translating the game (`lift_title.py`), measurements, captures, debugging tools; each script says what it does in its header |
+| [toolkit/](toolkit/) | our changes to ps3recomp: a diff to apply on the commit named in `BASE.txt`, plus the files we added |
 
-Ce qui n'y est pas, et n'y entrera pas : l'`EBOOT` déchiffré, le code traduit (`work/`), les
-images SPU, les fichiers du jeu extraits ou modifiés, les fichiers du firmware, l'exe compilé.
+What is not here, and never will be: the decrypted `EBOOT`, the translated code (`work/`), the
+SPU images, extracted or modified game files, firmware files, the compiled exe.
 
-## Ce qu'il faut pour reconstruire
+## What you need to rebuild it
 
-- Windows 10 ou 11 64 bits, une carte Direct3D 12, un processeur AVX2 + FMA.
-- Visual Studio avec clang-cl, CMake, Ninja, Python 3 ; Rust et WebView2 pour le lanceur.
-- Le disque du jeu (BCES00484, v02.00), copié sur le PC.
-- [RPCS3](https://rpcs3.net/) pour déchiffrer `EBOOT.BIN`, et le firmware PS3 (`libsre.prx`,
+- Windows 10 or 11, 64-bit, a Direct3D 12 graphics card, a CPU with AVX2 and FMA.
+- Visual Studio with clang-cl, CMake, Ninja, Python 3; Rust and WebView2 for the launcher.
+- The game disc (BCES00484, v02.00), copied to the PC.
+- [RPCS3](https://rpcs3.net/) to decrypt `EBOOT.BIN`, and the PS3 firmware (`libsre.prx`,
   `dev_flash`).
 
-Les dossiers sont attendus côte à côte :
+The folders are expected side by side:
 
 ```
 Recomp\
-├── ps3recomp\     le toolkit, avec nos modifications
-├── .venv\         l'environnement Python des outils
+├── ps3recomp\     the toolkit, with our changes
+├── .venv\         the Python environment of the tools
 ├── tools\rpcs3\   RPCS3 portable
-└── MotorStorm\    ce dépôt
+└── MotorStorm\    this repository
 ```
 
-Les étapes, dans l'ordre :
+The steps, in order:
 
-1. **Le toolkit** : cloner ps3recomp, se placer sur le commit de
-   [toolkit/BASE.txt](toolkit/BASE.txt), `git apply` de `toolkit\ps3recomp_local.diff`, puis
-   copier `toolkit\new_files\` par-dessus.
-2. **Le jeu** : déchiffrer `EBOOT.BIN` (`rpcs3.exe --decrypt`) et poser le résultat dans
+1. **The toolkit**: clone ps3recomp, check out the commit named in
+   [toolkit/BASE.txt](toolkit/BASE.txt), `git apply` `toolkit\ps3recomp_local.diff`, then copy
+   `toolkit\new_files\` over it.
+2. **The game**: decrypt `EBOOT.BIN` (`rpcs3.exe --decrypt`) and put the result in
    `game\BCES00484\`.
-3. **La traduction** : `python scripts\lift_title.py BCES00484 --spu`, puis
-   `python scripts\func_hooks.py`. La marche complète (firmware, modules SPU, ordre des
-   étapes) est dans `.claude\skills\ps3-lift\SKILL.md`.
-4. **La compilation** : `port\build.bat configure`, puis `port\build.bat` (une vingtaine de
-   minutes pour une compilation complète).
-5. **Le lancement** : `port\run.bat` (développement), ou le dossier du joueur avec le lanceur
-   (`launcher\build.bat`, puis `scripts\deploy_game.ps1`).
+3. **The translation**: `python scripts\lift_title.py BCES00484 --spu`, then
+   `python scripts\func_hooks.py`. The full procedure (firmware, SPU modules, order of the
+   steps) is in `.claude\skills\ps3-lift\SKILL.md`.
+4. **The build**: `port\build.bat configure`, then `port\build.bat` (about twenty minutes for a
+   full build).
+5. **Running it**: `port\run.bat` (development), or the player's folder with the launcher
+   (`launcher\build.bat`, then `scripts\deploy_game.ps1`).
 
-Beaucoup de scripts et les fichiers `.bat` portent encore les chemins de la machine où le
-projet est né (`I:\Projets\Recomp`, `F:\Jeux\PS3`, `E:\ms_perf`) : ils sont à adapter.
+Many scripts and the `.bat` files still carry the paths of the machine the project was born on
+(`I:\Projets\Recomp`, `F:\Jeux\PS3`, `E:\ms_perf`): adapt them to yours.
 
-## Remerciements
+## Credits
 
-- [ps3recomp](https://github.com/sp00nznet/ps3recomp) (Ned Heller / sp00nznet, MIT) : le
-  toolkit de recompilation et son runtime.
+- [ps3recomp](https://github.com/sp00nznet/ps3recomp) (Ned Heller / sp00nznet, MIT): the
+  recompilation toolkit and its runtime.
 - [motorstorm-apocalypse-pc](https://github.com/millennium-h4x0r/motorstorm-apocalypse-pc)
-  (MIT) : un autre portage du même jeu, dont vient le lifter à registres locaux.
-- [RPCS3](https://rpcs3.net/) : déchiffrement et référence de comportement.
+  (MIT): another port of the same game, where the local-register lifter comes from.
+- [RPCS3](https://rpcs3.net/): decryption and behaviour reference.
 
-Ce que nous leur avons repris est noté dans [toolkit/NOTICE.md](toolkit/NOTICE.md).
+What we took from them is listed in [toolkit/NOTICE.md](toolkit/NOTICE.md).
 
-## Licence
+## License
 
-Notre code est sous licence MIT ([LICENSE](LICENSE)). Les notes de travail du projet (journal,
-docs par sujet) ne sont pas publiées : les commentaires du code qui renvoient à `docs\` ou à
-`CLAUDE.md` pointent vers elles.
+Our code is under the MIT License ([LICENSE](LICENSE)). The project's working notes (journal,
+per-topic docs) are not published: code comments that point to `docs\` or `CLAUDE.md` refer to
+them.
 
-MotorStorm est une marque de Sony Interactive Entertainment. Ce projet n'a aucun lien avec
-Sony ni avec Evolution Studios.
+MotorStorm and the MotorStorm: Apocalypse logo are trademarks of Sony Interactive Entertainment;
+the logo is shown here only to identify the game and is not covered by the MIT License. This
+project is not affiliated with Sony or Evolution Studios.
