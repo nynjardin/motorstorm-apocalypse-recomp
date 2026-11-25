@@ -1,5 +1,5 @@
 base commit (upstream sp00nznet/ps3recomp): de4f090328ea08bef6b2f15caec0b85e343a7ece
-written: 2026-11-25 20:13
+written: 2026-11-25 21:19
 modified files: 39, untracked files: 5
 
 To rebuild the patched toolkit: check that commit out, `git apply ps3recomp_local.diff`, copy new_files\ over it.

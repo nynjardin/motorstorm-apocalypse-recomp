@@ -23,7 +23,10 @@ param(
     [switch]$Photo,
     # -Gates: one more capture per entry, the entry written to the gate file ('fpb=301' = stop
     # before the first draw of program 0x301, 'fp=301' = after its last one), named gate_NN.
-    [string[]]$Gates = @()
+    [string[]]$Gates = @(),
+    # -KillFps: screenshots of the (photo mode) view, ref_0 first, then one per fragment program
+    # left out (kill_<fp>.png, PIX_COUNT_FILE 4th field), then ref_1: which program draws what.
+    [string[]]$KillFps = @()
 )
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force $Out | Out-Null
@@ -31,6 +34,8 @@ $gate = Join-Path $Out 'gate.txt'; $cap = Join-Path $Out 'cap'; $kill = Join-Pat
 Remove-Item $gate -ErrorAction SilentlyContinue
 Set-Content -Path $kill -Value '-1' -NoNewline
 $e = @{ PORT_RES = $Res; RSX_CAP_GATE = $gate; RSX_CAP_DIR = $cap; FB_KILL_UNIT_FILE = $kill }
+$pcf = Join-Path $Out 'pixcount.txt'
+if ($KillFps.Count) { Set-Content -Path $pcf -Value '-1' -NoNewline; $e['PIX_COUNT_FILE'] = $pcf }
 foreach ($k in $Env.Keys) { $e[$k] = $Env[$k] }
 $pad = Join-Path $env:TEMP 'motorstorm_pad.txt'
 
@@ -78,6 +83,19 @@ if ($Photo) {
 }
 for ($i = 0; $i -lt $Caps; $i++) { Take-Capture ('off_{0:d2}' -f $i) }
 for ($i = 0; $i -lt $Gates.Count; $i++) { Take-Capture ('gate_{0:d2}' -f $i) $Gates[$i] }
+if ($KillFps.Count) {
+    $shot = Join-Path $PSScriptRoot 'screenshot.ps1'
+    & $shot -Out (Join-Path $Out 'ref_0.png') | Out-Null
+    foreach ($fp in $KillFps) {
+        Set-Content -Path $pcf -Value "-1 0 0 $fp" -NoNewline
+        Start-Sleep -Milliseconds 1200          # the file is read every 15 frames
+        & $shot -Out (Join-Path $Out "kill_$fp.png") | Out-Null
+        Write-Host "kill $fp ($(Get-Title))"
+    }
+    Set-Content -Path $pcf -Value '-1' -NoNewline
+    Start-Sleep -Milliseconds 1200
+    & $shot -Out (Join-Path $Out 'ref_1.png') | Out-Null
+}
 if ($KillUnit -ge 0) {
     # -KillSpecs: several series, each "<min vertices> <max vertices>" (default: every such draw)
     $k = 0
