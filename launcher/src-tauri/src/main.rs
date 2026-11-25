@@ -1,4 +1,4 @@
-//! Lanceur MotorStorm: Apocalypse -- a portable launcher for the PC port.
+//! MotorStorm: Apocalypse launcher -- a portable launcher for the PC port.
 //!
 //! It sits at the root of the game folder, beside MotorStormApocalypse.exe and PS3_GAME, and
 //! writes nothing outside that folder: its settings (recomp/lanceur.json), the web view's data
@@ -121,7 +121,7 @@ impl Settings {
         let text = serde_json::to_string_pretty(self).expect("settings as JSON");
         std::fs::write(data.join("lanceur.json"), text).map_err(|e| e.to_string())?;
         let mut ini = String::from(
-            "# Written by Lanceur.exe: change the settings in the launcher, this file is rewritten.\r\n\
+            "# Written by Launcher.exe: change the settings in the launcher, this file is rewritten.\r\n\
              # NAME=value lines, read by MotorStormApocalypse.exe started without arguments.\r\n",
         );
         for (name, value) in self.variables(1) {

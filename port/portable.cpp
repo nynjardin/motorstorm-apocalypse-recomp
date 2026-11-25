@@ -1,8 +1,8 @@
 /* MotorStorm: Apocalypse port -- portable mode: the exe at the root of the game folder.
  *
  *   <game>\PS3_GAME\...              the dump, read in place, never written
- *   <game>\MotorStormApocalypse.exe  this exe, started WITHOUT ARGUMENTS (double click, Lanceur.exe)
- *   <game>\Lanceur.exe               the launcher (launcher\, docs\lanceur.md)
+ *   <game>\MotorStormApocalypse.exe  this exe, started WITHOUT ARGUMENTS (double click, Launcher.exe)
+ *   <game>\Launcher.exe               the launcher (launcher\, docs\lanceur.md)
  *   <game>\recomp\EBOOT.elf          the decrypted EBOOT (rpcs3.exe --decrypt PS3_GAME\USRDIR\EBOOT.BIN)
  *   <game>\recomp\settings.ini       NAME=value lines written by the launcher (optional)
  *   <game>\recomp\psarc_patches.bin, libsre_image.bin, dev_flash\   what port\run.bat points at

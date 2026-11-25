@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Lanceur MotorStorm Apocalypse",
+  "productName": "MotorStorm Apocalypse Launcher",
   "version": "0.1.0",
   "identifier": "fr.nynjardin.lanceur-motorstorm-apocalypse",
   "build": {

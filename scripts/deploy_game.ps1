@@ -1,7 +1,7 @@
 # Put the port in the game folder ("portable" layout: port\portable.cpp, docs\lanceur.md):
-#   <game>\MotorStormApocalypse.exe, <game>\Lanceur.exe      at the root, beside PS3_GAME
+#   <game>\MotorStormApocalypse.exe, <game>\Launcher.exe     at the root, beside PS3_GAME
 #   <game>\recomp\                                           everything else (see below)
-#   scripts\deploy_game.ps1 [-GameDir <root>] [-Exe <game exe>] [-Launcher <Lanceur.exe>] [-NoData]
+#   scripts\deploy_game.ps1 [-GameDir <root>] [-Exe <game exe>] [-Launcher <Launcher.exe>] [-NoData]
 # The dump itself (PS3_GAME, PS3_DISC.SFB) is never touched and nothing is ever deleted.
 #   - our build outputs are replaced by the current ones: the two exes, the three Visual C++ runtime
 #     DLLs beside them (msvcp140, vcruntime140, vcruntime140_1), recomp\psarc_patches.bin,
@@ -16,14 +16,18 @@
 param(
     [string]$GameDir = 'F:\Jeux\PS3\MotorStorm - Apocalypse (Europe) (En,Fr,De,Es,It,Nl,Pt,Sv,No,Da,Fi,Ko,Pl,Ru) (v02.00)',
     [string]$Exe = '',
-    [string]$Launcher = 'E:\ms_perf\launcher_target\release\Lanceur.exe',
+    [string]$Launcher = 'E:\ms_perf\launcher_target\release\Launcher.exe',
     [switch]$NoData
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 if (-not $Exe) { $Exe = Join-Path $repo 'port\build\MotorStormApocalypse.exe' }
 if (-not (Test-Path -LiteralPath (Join-Path $GameDir 'PS3_GAME\USRDIR\ms3.psarc'))) { throw "not a MotorStorm: Apocalypse folder: $GameDir" }
-if (Get-Process MotorStormApocalypse, Lanceur -ErrorAction SilentlyContinue) { throw 'the game or the launcher is running: close them first' }
+# "Launcher" is a common process name: only one that runs from this game folder counts (Lanceur.exe
+# is the launcher's name of before 2026-11-25, left in place by this script: nothing is deleted).
+$busy = Get-Process MotorStormApocalypse, Launcher, Lanceur -ErrorAction SilentlyContinue |
+    Where-Object { $_.ProcessName -eq 'MotorStormApocalypse' -or ($_.Path -and $_.Path.StartsWith($GameDir, [StringComparison]::OrdinalIgnoreCase)) }
+if ($busy) { throw 'the game or the launcher is running: close them first' }
 $data = Join-Path $GameDir 'recomp'
 New-Item -ItemType Directory -Force -Path $data | Out-Null
 
@@ -44,7 +48,7 @@ function Seed([string]$from, [string]$to) {            # the player's: only when
 
 Write-Host "game folder: $GameDir"
 Put $Exe (Join-Path $GameDir 'MotorStormApocalypse.exe')
-Put $Launcher (Join-Path $GameDir 'Lanceur.exe')
+Put $Launcher (Join-Path $GameDir 'Launcher.exe')
 # The Visual C++ runtime the game exe imports, beside it: the folder then starts on a PC that has no
 # "Visual C++ Redistributable 2015-2022 x64". Taken from System32, the version this PC runs the
 # build with: a copy beside the exe wins over the system one, so it must never be OLDER than the
@@ -63,9 +67,30 @@ if (-not $NoData) {
     Seed (Join-Path (Split-Path $repo -Parent) 'tools\rpcs3\dev_flash') (Join-Path $data 'dev_flash')
 }
 $readme = @(
+    'MotorStorm: Apocalypse, PC version (static recompilation)',
+    '',
+    'To play: Launcher.exe (player name, local network, settings), or MotorStormApocalypse.exe directly.',
+    'Both must stay at the root of the game folder, beside PS3_GAME, with msvcp140.dll,',
+    'vcruntime140.dll and vcruntime140_1.dll (the Visual C++ runtime the game needs).',
+    '',
+    'This recomp folder holds everything the port adds to the game; the disc (PS3_GAME) is never modified.',
+    '  save\                 the game''s save',
+    '  dev_hdd0\, dev_hdd1\   the cache the game builds the first time it runs (may be deleted: it is rebuilt)',
+    '  shader_cache\         shaders already compiled (same)',
+    '  run.log               what the game wrote the last time it ran (run.prev.log: the time before)',
+    '  lanceur.json, settings.ini   the settings chosen in the launcher',
+    '  EBOOT.elf             the game''s decrypted executable (rpcs3.exe --decrypt PS3_GAME\USRDIR\EBOOT.BIN)',
+    '  dev_flash\, libsre_image.bin   files of the PS3 firmware',
+    '  psarc_patches.bin     game menus changed as they are read (LAN games, results)',
+    '',
+    'Every path is relative: the game folder can be moved or copied as it is to another PC.',
+    'Do not distribute: MotorStormApocalypse.exe (the game''s code, recompiled), EBOOT.elf, dev_flash, libsre_image.bin.',
+    '',
+    '----------------------------------------------------------------------',
+    '',
     'MotorStorm: Apocalypse, version PC (recompilation statique)',
     '',
-    'Lancer : Lanceur.exe (pseudo, reseau local, reglages), ou MotorStormApocalypse.exe directement.',
+    'Lancer : Launcher.exe (pseudo, reseau local, reglages), ou MotorStormApocalypse.exe directement.',
     'Les deux doivent rester a la racine du dossier du jeu, a cote de PS3_GAME, avec msvcp140.dll,',
     'vcruntime140.dll et vcruntime140_1.dll (le runtime Visual C++ dont le jeu a besoin).',
     '',
@@ -82,7 +107,8 @@ $readme = @(
     'Tout est en chemins relatifs : le dossier du jeu peut etre deplace ou copie tel quel sur un autre PC.',
     'A ne pas diffuser : MotorStormApocalypse.exe (le code du jeu recompile), EBOOT.elf, dev_flash, libsre_image.bin.'
 )
-Set-Content -LiteralPath (Join-Path $data 'LISEZ-MOI.txt') -Value $readme -Encoding ASCII
-Write-Host '  recomp\LISEZ-MOI.txt'
-Write-Host 'done: start Lanceur.exe in the game folder.'
+# English first, then French, in one file (LISEZ-MOI.txt was its name before 2026-11-25).
+Set-Content -LiteralPath (Join-Path $data 'README.txt') -Value $readme -Encoding ASCII
+Write-Host '  recomp\README.txt'
+Write-Host 'done: start Launcher.exe in the game folder.'
 exit 0      # robocopy leaves 1 ("files copied") in $LASTEXITCODE

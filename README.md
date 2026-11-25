@@ -28,7 +28,7 @@ the game and the firmware of your own console to use it.
 | Folder | Contents |
 |---|---|
 | [port/](port/) | the port's CMake project: `main.cpp`, answers to the console's libraries (`hle_overrides.cpp`), network (`net_hooks.cpp`), build and run scripts |
-| [launcher/](launcher/) | `Lanceur.exe` (Tauri 2): settings, LAN games, starting the game from its own folder |
+| [launcher/](launcher/) | `Launcher.exe` (Tauri 2): settings, LAN games, starting the game from its own folder |
 | [scripts/](scripts/) | translating the game (`lift_title.py`), measurements, captures, debugging tools; each script says what it does in its header |
 | [toolkit/](toolkit/) | our changes to ps3recomp: a diff to apply on the commit named in `BASE.txt`, plus the files we added |
 

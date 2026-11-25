@@ -1,8 +1,8 @@
-# ui_auto.ps1 -Proc Lanceur [-List] [-Invoke <name regex>] [-Toggle <name regex>] [-SetValue <name regex> -Value <text>]
+# ui_auto.ps1 -Proc Launcher [-List] [-Invoke <name regex>] [-Toggle <name regex>] [-SetValue <name regex> -Value <text>]
 # Drive a window through Windows UI Automation (the accessibility tree), without moving the mouse or
 # taking the focus: what the launcher's page shows (PrintWindow captures a WebView2 page as blank) and a
 # "click" on one of its buttons. -List prints the named buttons, check boxes, fields and texts.
-param([string]$Proc = 'Lanceur', [switch]$List, [string]$Invoke = '', [string]$Toggle = '', [string]$SetValue = '', [string]$Value = '', [int]$Max = 80)
+param([string]$Proc = 'Launcher', [switch]$List, [string]$Invoke = '', [string]$Toggle = '', [string]$SetValue = '', [string]$Value = '', [int]$Max = 80)
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 $p = Get-Process $Proc -ErrorAction Stop | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
 if (-not $p) { "no window"; exit 1 }
