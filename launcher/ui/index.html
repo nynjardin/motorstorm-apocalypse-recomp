@@ -7,7 +7,8 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <!-- The text in this page is the English one; app.js replaces every element that carries a
-     data-i18n* attribute with the text of the chosen language (its TEXT table). -->
+     data-i18n* attribute with the text of the chosen language (its TEXT table). The sections are
+     the <section data-page> of <main>; the buttons of the sidebar (data-go) show one at a time. -->
 <body>
   <header class="topbar">
     <div class="logo">MS</div>
@@ -16,6 +17,7 @@
       <span><span data-i18n="brand">PC version — launcher</span> <span id="launcher-version"></span></span>
     </div>
     <div class="playtime" id="playtime"></div>
+    <button class="files-alert" id="files-alert" data-go="files" hidden></button>
     <select id="lang" class="lang" title="Language / Langue">
       <option value="en">English</option>
       <option value="fr">Français</option>
@@ -23,102 +25,127 @@
   </header>
 
   <div class="layout">
-    <aside class="sidebar">
-      <h2 data-i18n="folder_title">The game folder</h2>
-      <ul class="checks" id="checks"></ul>
-      <p class="folder" id="folder"></p>
-      <div class="side-buttons">
-        <button class="ghost" data-open="dossier" data-i18n="open_folder">Folder</button>
-        <button class="ghost" data-open="sauvegarde" data-i18n="open_save" data-i18n-title="open_save_tip" title="recomp\save: the game's save">Save</button>
-        <button class="ghost" data-open="journal" data-i18n="open_log" data-i18n-title="open_log_tip" title="recomp\run.log: what the game wrote the last time it ran">Log</button>
-      </div>
-    </aside>
+    <nav class="sidebar">
+      <button class="nav" data-go="player"><span class="nav-icon">👤</span><span data-i18n="nav_player">Player</span></button>
+      <button class="nav" data-go="multi"><span class="nav-icon">🌐</span><span data-i18n="nav_multi">Multiplayer</span></button>
+      <button class="nav" data-go="display"><span class="nav-icon">🖥</span><span data-i18n="nav_display">Display</span></button>
+      <button class="nav" data-go="files"><span class="nav-icon">📁</span><span data-i18n="nav_files">Files</span><span class="badge" id="files-badge" hidden></span></button>
+      <div class="nav-spacer"></div>
+      <button class="nav" data-go="dev"><span class="nav-icon">🛠</span><span data-i18n="nav_dev">Dev</span><span class="badge info" id="dev-badge" hidden></span></button>
+    </nav>
 
     <main class="detail">
-      <section class="card">
-        <h2 data-i18n="player_title">Player</h2>
-        <label class="field">
-          <span data-i18n="pseudo">Player name</span>
-          <input type="text" id="pseudo" maxlength="16" spellcheck="false" autocomplete="off">
-          <small data-i18n="pseudo_help">3 to 16 characters: unaccented letters, digits, - or _. This is the name the other players see.</small>
-        </label>
-        <label class="field">
-          <span data-i18n="game_lang">Game language</span>
-          <select id="game-lang">
-            <option value="" data-i18n="game_lang_auto">Automatic (the language of Windows)</option>
-            <option value="en">English</option>
-            <option value="fr">Français</option>
-            <option value="de">Deutsch</option>
-            <option value="es">Español</option>
-            <option value="it">Italiano</option>
-            <option value="nl">Nederlands</option>
-            <option value="pt">Português</option>
-            <option value="sv">Svenska</option>
-            <option value="no">Norsk</option>
-            <option value="da">Dansk</option>
-            <option value="fi">Suomi</option>
-            <option value="pl">Polski</option>
-            <option value="ru">Русский</option>
-            <option value="ko">한국어</option>
-          </select>
-          <small data-i18n="game_lang_help">The language of the game's menus and voices. It applies the next time the game starts.</small>
-        </label>
-      </section>
-
-      <section class="card">
-        <h2 data-i18n="lan_title">Local network</h2>
-        <label class="check"><input type="checkbox" id="lan"> <span data-i18n="lan">Multiplayer on the local network (no server)</span></label>
-        <div id="lan-box">
+      <section data-page="player">
+        <h1 data-i18n="player_title">Player</h1>
+        <div class="card">
           <label class="field">
-            <span data-i18n="net_ip">Network card</span>
-            <select id="net-ip"></select>
-            <small data-i18n="net_ip_help">Every PC must be on the same network. A virtual network (ZeroTier, Radmin VPN) = playing over the Internet.</small>
+            <span data-i18n="pseudo">Player name</span>
+            <input type="text" id="pseudo" maxlength="16" spellcheck="false" autocomplete="off">
+            <small data-i18n="pseudo_help">3 to 16 characters: unaccented letters, digits, - or _. This is the name the other players see.</small>
           </label>
           <label class="field">
-            <span data-i18n-html="peers">Addresses of the other PCs <em>(optional)</em></span>
-            <input type="text" id="peers" spellcheck="false" autocomplete="off" data-i18n-placeholder="peers_example" placeholder="e.g. 192.168.1.20, 192.168.1.21">
-            <small data-i18n="peers_help">Only if the others' games do not show up in the game's search (a network without broadcast).</small>
+            <span data-i18n="game_lang">Game language</span>
+            <select id="game-lang">
+              <option value="" data-i18n="game_lang_auto">Automatic (the language of Windows)</option>
+              <option value="en">English</option>
+              <option value="fr">Français</option>
+              <option value="de">Deutsch</option>
+              <option value="es">Español</option>
+              <option value="it">Italiano</option>
+              <option value="nl">Nederlands</option>
+              <option value="pt">Português</option>
+              <option value="sv">Svenska</option>
+              <option value="no">Norsk</option>
+              <option value="da">Dansk</option>
+              <option value="fi">Suomi</option>
+              <option value="pl">Polski</option>
+              <option value="ru">Русский</option>
+              <option value="ko">한국어</option>
+            </select>
+            <small data-i18n="game_lang_help">The language of the game's menus and voices. It applies the next time the game starts.</small>
           </label>
-          <p class="hint" data-i18n-html="lan_hint">In the game: open the multiplayer menu, then <b>host a private game</b> or <b>search for a game</b> to join. Firewall: UDP 3658 and 3659.</p>
         </div>
       </section>
 
-      <section class="card">
-        <h2 data-i18n="picture_title">Picture</h2>
-        <label class="field" style="margin: 0 0 10px">
-          <span data-i18n="res">Picture resolution</span>
-          <select id="res">
-            <option value="" data-i18n="res_720">1280 × 720 (HD, as on PS3)</option>
-            <option value="1920x1080">1920 × 1080 (Full HD)</option>
-            <option value="2560x1440">2560 × 1440 (QHD)</option>
-            <option value="3840x2160">3840 × 2160 (4K)</option>
-          </select>
-          <small data-i18n="res_help">The size the game computes its picture at: the larger, the finer the picture (and the more work for the graphics card).</small>
-        </label>
-        <label class="field" style="margin: 0 0 10px">
-          <span data-i18n="window">Game window</span>
-          <select id="window">
-            <option value="" data-i18n="window_size">A window the size of the picture</option>
-            <option value="fullscreen" data-i18n="window_full">Full screen (borderless)</option>
-          </select>
-          <small data-i18n="window_help">In full screen the picture keeps its shape (16:9): black bars on the sides of a wider screen.</small>
-        </label>
-        <label class="check"><input type="radio" name="fps" id="fps30" value="30"> <span data-i18n="fps30">30 frames per second (as on PS3)</span></label>
-        <label class="check"><input type="radio" name="fps" id="fps60" value="60"> <span data-i18n-html="fps60">Up to 60 frames per second <em>(experimental)</em></span></label>
+      <section data-page="multi" hidden>
+        <h1 data-i18n="lan_title">Multiplayer</h1>
+        <div class="card">
+          <label class="check"><input type="checkbox" id="lan"> <span data-i18n="lan">Multiplayer on the local network (no server)</span></label>
+          <div id="lan-box">
+            <label class="field">
+              <span data-i18n="net_ip">Network card</span>
+              <select id="net-ip"></select>
+              <small data-i18n="net_ip_help">Every PC must be on the same network. A virtual network (ZeroTier, Radmin VPN) = playing over the Internet.</small>
+            </label>
+            <label class="field">
+              <span data-i18n-html="peers">Addresses of the other PCs <em>(optional)</em></span>
+              <input type="text" id="peers" spellcheck="false" autocomplete="off" data-i18n-placeholder="peers_example" placeholder="e.g. 192.168.1.20, 192.168.1.21">
+              <small data-i18n="peers_help">Only if the others' games do not show up in the game's search (a network without broadcast).</small>
+            </label>
+            <p class="hint" data-i18n-html="lan_hint">In the game: open the multiplayer menu, then <b>host a private game</b> or <b>search for a game</b> to join. Firewall: UDP 3658 and 3659.</p>
+          </div>
+          <p class="hint" id="local-test-note" data-i18n="local_test_note" hidden>The two-player test on this PC is on (Dev section): the card and the addresses above are not used.</p>
+        </div>
       </section>
 
-      <details class="card" id="advanced">
-        <summary data-i18n="trouble_title">Troubleshooting</summary>
-        <label class="check"><input type="checkbox" id="rsx-async"> <span data-i18n-html="rsx_async">Rendering on its own thread <em>(untick after a freeze or a picture defect)</em></span></label>
-        <label class="check"><input type="checkbox" id="spu-async-pool"> <span data-i18n-html="spu_async_pool">SPU tasks in parallel <em>(untick after a freeze)</em></span></label>
-        <label class="check"><input type="checkbox" id="geo-cache"> <span data-i18n-html="geo_cache">Geometry cache <em>(untick if objects are missing)</em></span></label>
-        <label class="check"><input type="checkbox" id="game-log"> <span data-i18n="game_log">The game's debug messages in the log</span></label>
-        <label class="check"><input type="checkbox" id="local-test"> <span data-i18n-html="local_test">Two-player test on this PC <em>(two games, each with its own save; not for playing between PCs)</em></span></label>
-        <label class="field">
-          <span data-i18n-html="extra">More variables <em>(one per line: NAME=value)</em></span>
-          <textarea id="extra" rows="3" spellcheck="false"></textarea>
-        </label>
-      </details>
+      <section data-page="display" hidden>
+        <h1 data-i18n="picture_title">Display</h1>
+        <div class="card">
+          <label class="field">
+            <span data-i18n="res">Picture resolution</span>
+            <select id="res">
+              <option value="" data-i18n="res_720">1280 × 720 (HD, as on PS3)</option>
+              <option value="1920x1080">1920 × 1080 (Full HD)</option>
+              <option value="2560x1440">2560 × 1440 (QHD)</option>
+              <option value="3840x2160">3840 × 2160 (4K)</option>
+            </select>
+            <small data-i18n="res_help">The size the game computes its picture at: the larger, the finer the picture (and the more work for the graphics card).</small>
+          </label>
+          <label class="field">
+            <span data-i18n="window">Game window</span>
+            <select id="window">
+              <option value="" data-i18n="window_size">A window the size of the picture</option>
+              <option value="fullscreen" data-i18n="window_full">Full screen (borderless)</option>
+            </select>
+            <small data-i18n="window_help">In full screen the picture keeps its shape (16:9): black bars on the sides of a wider screen.</small>
+          </label>
+          <div class="field">
+            <span data-i18n="fps_title">Frame rate</span>
+            <label class="check"><input type="radio" name="fps" id="fps30" value="30"> <span data-i18n="fps30">30 frames per second (as on PS3)</span></label>
+            <label class="check"><input type="radio" name="fps" id="fps60" value="60"> <span data-i18n-html="fps60">Up to 60 frames per second <em>(experimental)</em></span></label>
+          </div>
+        </div>
+      </section>
+
+      <section data-page="files" hidden>
+        <h1 data-i18n="folder_title">The game folder</h1>
+        <div class="card">
+          <ul class="checks" id="checks"></ul>
+        </div>
+        <div class="card">
+          <p class="folder" id="folder"></p>
+          <div class="side-buttons">
+            <button class="ghost" data-open="dossier" data-i18n="open_folder">Folder</button>
+            <button class="ghost" data-open="sauvegarde" data-i18n="open_save" data-i18n-title="open_save_tip" title="recomp\save: the game's save">Save</button>
+            <button class="ghost" data-open="journal" data-i18n="open_log" data-i18n-title="open_log_tip" title="recomp\run.log: what the game wrote the last time it ran">Log</button>
+          </div>
+        </div>
+      </section>
+
+      <section data-page="dev" hidden>
+        <h1 data-i18n="dev_title">Dev</h1>
+        <p class="lead" data-i18n="dev_lead">Settings to find the cause of a problem or to measure. Leave them as they are to play: each one shows its default, and a changed one is marked.</p>
+        <div id="dev-list"></div>
+        <div class="card">
+          <h2 data-i18n="dev_cat_more">More variables</h2>
+          <label class="field">
+            <span data-i18n-html="extra">More variables <em>(one per line: NAME=value)</em></span>
+            <textarea id="extra" rows="3" spellcheck="false"></textarea>
+            <small data-i18n="extra_help">They come last: a variable written here wins over the same one above.</small>
+          </label>
+        </div>
+        <button class="ghost" id="dev-reset" data-i18n="dev_reset">Put every Dev setting back to its default</button>
+      </section>
     </main>
   </div>
 

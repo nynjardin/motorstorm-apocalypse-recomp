@@ -13,7 +13,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{ToSocketAddrs, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -49,10 +49,18 @@ struct Settings {
     window: String,
     /// Two games on this PC (tests): each is its own loopback address.
     local_test: bool,
+    /// The Dev section: the game's variables that are NOT at their default (NAME -> value). The
+    /// page knows the list (DEV in ui/app.js); here they are passed on as they are.
+    dev: BTreeMap<String, String>,
+    /// Before the Dev section (launcher 0.1, 2026-11-25): read from an old lanceur.json, moved
+    /// into `dev` by `load`, never written again.
+    #[serde(skip_serializing)]
     rsx_async: bool,
+    #[serde(skip_serializing)]
     spu_async_pool: bool,
+    #[serde(skip_serializing)]
     geo_cache: bool,
-    /// The title's own debug messages in the log.
+    #[serde(skip_serializing)]
     game_log: bool,
     /// More NAME=value lines, as they are.
     extra: String,
@@ -79,6 +87,7 @@ impl Default for Settings {
             res: String::new(),
             window: String::new(),
             local_test: false,
+            dev: BTreeMap::new(),
             rsx_async: true,
             spu_async_pool: true,
             geo_cache: true,
@@ -92,6 +101,10 @@ impl Default for Settings {
 
 fn valid_pseudo(p: &str) -> bool {
     (3..=16).contains(&p.len()) && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn valid_variable_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn valid_ips(list: &str) -> bool {
@@ -109,10 +122,22 @@ impl Settings {
     }
 
     fn load(folder: &Path) -> Settings {
-        std::fs::read_to_string(folder.join(DATA).join("lanceur.json"))
+        let mut s: Settings = std::fs::read_to_string(folder.join(DATA).join("lanceur.json"))
             .ok()
             .and_then(|text| serde_json::from_str(text.trim_start_matches('\u{feff}')).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // The four boxes of the old "Troubleshooting" card become Dev settings.
+        let mut old = |was_changed: bool, name: &str, value: &str| {
+            if was_changed {
+                s.dev.entry(name.to_string()).or_insert_with(|| value.to_string());
+            }
+        };
+        old(!s.rsx_async, "RSX_ASYNC", "0");
+        old(!s.spu_async_pool, "SPU_ASYNC_POOL", "0");
+        old(!s.geo_cache, "GEO_CACHE", "0");
+        old(s.game_log, "PORT_GAME_LOG", "1");
+        (s.rsx_async, s.spu_async_pool, s.geo_cache, s.game_log) = (true, true, true, false);
+        s
     }
 
     fn save(&self, folder: &Path) -> Result<(), String> {
@@ -158,6 +183,11 @@ impl Settings {
         if !(self.window.is_empty() || self.window == "fullscreen" || size_ok(&self.window)) {
             return Err(format!("{} {}", tr(fr, "Unexpected window size:", "Taille de fenêtre inattendue :"), self.window));
         }
+        for (name, value) in &self.dev {
+            if !valid_variable_name(name) || value.len() > 1024 || value.contains(['\r', '\n']) {
+                return Err(format!("{} {name}", tr(fr, "Unexpected Dev setting:", "Réglage Dev inattendu :")));
+            }
+        }
         Ok(())
     }
 
@@ -202,17 +232,10 @@ impl Settings {
         if !self.window.is_empty() {
             set("PORT_WINDOW", &self.window);
         }
-        if !self.rsx_async {
-            set("RSX_ASYNC", "0");
-        }
-        if !self.spu_async_pool {
-            set("SPU_ASYNC_POOL", "0");
-        }
-        if !self.geo_cache {
-            set("GEO_CACHE", "0");
-        }
-        if self.game_log {
-            set("PORT_GAME_LOG", "1");
+        for (name, value) in &self.dev {
+            if valid_variable_name(name) {
+                set(name, value);
+            }
         }
         for line in self.extra.lines() {
             let line = line.trim();
@@ -221,12 +244,20 @@ impl Settings {
             }
             if let Some((name, value)) = line.split_once('=') {
                 let name = name.trim();
-                if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                if valid_variable_name(name) {
                     set(name, value.trim());
                 }
             }
         }
-        v
+        // One line per variable, the last one set wins (the free lines over the Dev settings).
+        let mut out: Vec<(String, String)> = Vec::new();
+        for (name, value) in v.into_iter().rev() {
+            if !out.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) {
+                out.push((name, value));
+            }
+        }
+        out.reverse();
+        out
     }
 }
 
@@ -391,8 +422,8 @@ fn play(app: tauri::AppHandle, launcher: State<Launcher>, instance: u32) -> Resu
     if instance >= 2 && !(settings.lan && settings.local_test) {
         return Err(tr(
             fr,
-            "The second game is for the two-player test on this PC (tick it under Troubleshooting).",
-            "Le deuxième jeu sert au test à deux sur ce PC (à cocher dans Dépannage).",
+            "The second game is for the two-player test on this PC (tick it in the Dev section).",
+            "Le deuxième jeu sert au test à deux sur ce PC (à cocher dans la section Dev).",
         )
         .into());
     }
