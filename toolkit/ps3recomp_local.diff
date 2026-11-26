@@ -9673,6 +9673,66 @@ index 97a9d17f..1ed97f7c 100644
  
      if (ok)
          ppu_cr_set(ctx, 0, PPU_CR_EQ | (PPU_CR_SO * ppu_xer_get_so(ctx)));
+diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
+index fd2c2078..870a8131 100644
+--- a/runtime/ppu/ppu_sysprx.cpp
++++ b/runtime/ppu/ppu_sysprx.cpp
+@@ -415,9 +415,30 @@ static void sys_lwcond_create(ppu_context* ctx)
+     ctx->gpr[3] = 0;
+ }
+ static void sys_lwcond_destroy(ppu_context* ctx)    { ctx->gpr[3] = 0; }
+-static void sys_lwcond_signal(ppu_context* ctx)     { ctx->gpr[3] = 0; }
+-static void sys_lwcond_signal_all(ppu_context* ctx) { ctx->gpr[3] = 0; }
+-static void sys_lwcond_signal_to(ppu_context* ctx)  { ctx->gpr[3] = 0; }
++/* Local patch #69: real wakeups. The waits used to be Sleep(1) polls with no-op signals:
++ * ~8000 waits/s over ~15 threads during a race load (measured 2026-11-27), each wake-up up to
++ * 1-2 ms late and the idle ones burning CPU. Now every lwcond hashes to a generation counter:
++ * wait reads it (still holding the lwmutex), releases, and sleeps on the address until a signal
++ * bumps it or 5 ms pass (the guest loop re-checks its predicate, so a late or spurious wake is
++ * harmless and a missed signal costs 5 ms, not a hang). LWCOND_WAKE=0 = the old Sleep(1). */
++#ifdef _WIN32
++#pragma comment(lib, "synchronization")
++#endif
++static volatile uint32_t s_lwc_gen[256];
++static int s_lwc_wake = -1;
++static inline unsigned lwc_slot(uint32_t lwcond) { return (lwcond >> 3) & 255u; }
++static void lwc_bump(ppu_context* ctx)
++{
++#ifdef _WIN32
++    unsigned i = lwc_slot((uint32_t)ctx->gpr[3]);
++    InterlockedIncrement((volatile LONG*)&s_lwc_gen[i]);
++    WakeByAddressAll((PVOID)&s_lwc_gen[i]);
++#endif
++    ctx->gpr[3] = 0;
++}
++static void sys_lwcond_signal(ppu_context* ctx)     { lwc_bump(ctx); }
++static void sys_lwcond_signal_all(ppu_context* ctx) { lwc_bump(ctx); }
++static void sys_lwcond_signal_to(ppu_context* ctx)  { lwc_bump(ctx); }
+ /* Now that the lwmutex is REAL, a no-op wait that keeps holding it deadlocks the
+  * signaler. Release the paired lwmutex, wait briefly, reacquire (poll-style: the
+  * guest's while(!predicate) loop re-checks; signalers stay no-ops). Handles the
+@@ -433,8 +454,21 @@ static void sys_lwcond_wait(ppu_context* ctx)
+         vm_write32(lwmutex + LWM_RECUR, 0);
+         vm_write32(lwmutex + LWM_OWNER, 0);
+         ppu_thread_note_block(ctx->thread_id);
++#ifdef _WIN32
++        if (s_lwc_wake < 0) { const char* e = getenv("LWCOND_WAKE"); s_lwc_wake = !(e && e[0] == '0'); }
++        if (s_lwc_wake) {
++            unsigned gi = lwc_slot(lwcond);
++            LONG seen = (LONG)s_lwc_gen[gi];
++            lwm_release(sl);
++            WaitOnAddress((volatile VOID*)&s_lwc_gen[gi], &seen, sizeof(seen), 5);
++        } else {
++            lwm_release(sl);
++            Sleep(1);
++        }
++#else
+         lwm_release(sl);
+         Sleep(1);
++#endif
+         lwm_acquire(sl, 0);
+         vm_write32(lwmutex + LWM_OWNER, own);
+         vm_write32(lwmutex + LWM_RECUR, rc ? rc : 1);
 diff --git a/runtime/ppu/ppu_vmx.h b/runtime/ppu/ppu_vmx.h
 index f1646788..b1347774 100644
 --- a/runtime/ppu/ppu_vmx.h
