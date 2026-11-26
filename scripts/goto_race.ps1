@@ -14,6 +14,7 @@ param(
     [string[]]$Steps = @(),
     [string]$Track = "",
     [int]$TitleTimeout = 300,
+    [double]$MenuScale = 0.5,
     [switch]$NoStart,     # stop on the Course rapide setup screen (no final X), game left running
     [switch]$Multiplayer  # "Pour le fun" -> DOWN -> X = "Multijoueur" (online Wreckreation), then stop; game left running
 )
@@ -68,14 +69,16 @@ foreach ($k in $Env.Keys) { Remove-Item -Path "env:$k" -ErrorAction SilentlyCont
 Start-Sleep 5
 
 $script:step = 0
-function Send-Pad([string]$mask, [int]$wait) {
+# -MenuScale scales every menu wait (1 = old timings, 0.5 = twice as fast); lower until a press is lost.
+$script:menuScale = $MenuScale
+function Send-Pad([string]$mask, [double]$wait) {
     # The game opens the file every pad poll: retry a write that hits it.
     for ($try = 0; ; $try++) {
         try { Set-Content -Path $pad -Value $mask -NoNewline -ErrorAction Stop; break }
         catch { if ($try -ge 50) { throw }; Start-Sleep -Milliseconds 20 }
     }
     Write-Host "pad $mask"
-    Start-Sleep $wait
+    Start-Sleep -Milliseconds ([int]($wait * 1000 * $script:menuScale))
     if ($ShotDir) {   # one screenshot after each press: shows what the menus selected
         $script:step++
         & (Join-Path $PSScriptRoot 'screenshot.ps1') -Out (Join-Path $ShotDir ("step{0}.png" -f $script:step))
@@ -94,19 +97,20 @@ while (-not (Test-Path $log) -or -not (Select-String -Path $log -Pattern 'mainti
         if ($script:sameTitle -ge 8) { throw 'FROZEN before the title screen (title unchanged for 16 s); game left running' } }
 }
 Write-Host ("title screen after {0:N0}s" -f ((Get-Date) - $t0).TotalSeconds)
-Start-Sleep 15   # maintitles (short clip) -> title screen
+Start-Sleep -Milliseconds ([int](6000 * $MenuScale))   # maintitles (short clip) -> title screen (was 15 s)
 Send-Pad '0x4000 8' 4      # X: title -> main menu
 # The main menu takes 5-10 s to appear (white flash first, ~12 draws): a DOWN sent before it is up is
 # lost, and the next X then opens "Festival" (prologue) instead of "Pour le fun". Wait for the flash
 # (the title screen itself draws > 100), then for the menu.
-$m0 = Get-Date; $up = 0; $flash = $false
+$m0 = Get-Date; $up = 0; $flash = $false; $d = 0
 while ($up -lt 2 -and ((Get-Date) - $m0).TotalSeconds -lt 40) {
     Start-Sleep -Milliseconds 300
+    if (-not $flash -and $up -eq 0 -and ((Get-Date) - $m0).TotalSeconds -gt 8 -and $d -gt 100) { break }   # no white flash with an existing save (seen 2026-11-27): menu is up
     $gp = Get-Process MotorStormApocalypse -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
-    if ($gp) { $gp.Refresh(); if ($gp.MainWindowTitle -match 'draws: ([0-9]+)') { $d = [int]$Matches[1]; if ($d -lt 50) { $flash = $true; $up = 0 } elseif ($flash -and $d -gt 100) { $up++ } } }
+    if ($gp) { $gp.Refresh(); if ($gp.MainWindowTitle -match 'draws: ([0-9]+)') { $d = [int]$Matches[1]; if ($env:MENU_TRACE) { Write-Host ("{0:N1}s d={1}" -f ((Get-Date)-$m0).TotalSeconds, $d) }; if ($d -lt 50) { $flash = $true; $up = 0 } elseif ($flash -and $d -gt 100) { $up++ } } }
 }
 Write-Host ("main menu up after {0:N0}s" -f ((Get-Date) - $m0).TotalSeconds)
-Start-Sleep 3
+Start-Sleep -Milliseconds ([int](3000 * $MenuScale))
 Send-Pad '0x0040 4' 3      # DOWN: "Pour le fun"
 Send-Pad '0x4000 8' 5      # X: "Pour le fun" -> Course rapide / Multijoueur / Epreuves speciales
 if ($Multiplayer) {
@@ -119,8 +123,9 @@ Send-Pad '0x4000 8' 5      # X: "Course rapide" -> setup screen (DEPART selected
 # Durations are counts of pad reports, on purpose: the menus auto-repeat a direction every ~5 FRAMES
 # held, and they run at 100+ FPS, so a hold in time ('120ms', toolkit patch #29) moves 2-3 entries.
 # Masks: CROSS 0x4000, CIRCLE 0x2000, UP 0x0010, DOWN 0x0040, LEFT 0x0080, RIGHT 0x0020, START 0x0008.
-foreach ($s in $Steps) { $p = $s -split ' '; Send-Pad ("{0} {1}" -f $p[0], $p[1]) ([int]$p[2]) }
+foreach ($s in $Steps) { $p = $s -split ' '; Send-Pad ("{0} {1}" -f $p[0], $p[1]) ([double]$p[2]) }
 if ($NoStart) { return }
+Start-Sleep 2              # let the cursor settle on DEPART (1.5 s was not enough at -MenuScale 0.5)
 Send-Pad '0x4000 8' 5      # X: last confirmation, start the race (user-verified 2026-11-20)
 Start-Sleep $AfterSeconds
 if ($Shot) { & (Join-Path $PSScriptRoot 'screenshot.ps1') -Out $Shot }
