@@ -69,6 +69,15 @@ rem interval at PORT_SIM_INTERVAL vblanks (1 = up to 60 FPS, 2 = 30 at most but 
 rem under 30). 0 = the game as shipped. 2026-11-24, bridge: 41 FPS standing, 46 driving, race
 rem clock x0.999 of the wall clock. docs\hle.md "Above 30 FPS at normal speed".
 if not defined PORT_SIM_RT set "PORT_SIM_RT=0"
+rem Movies (docs\hle.md "Movies"): OFF by default (short copy of the logo clip) since 2026-11-27 evening:
+rem PORT_PLAY_VIDEOS=1 plays the real AVI files when FFmpeg is found (avcodec-62.dll, avutil-60.dll,
+rem swresample-6.dll beside the exe), but the first movie stalls at its 27th access unit about half of the
+rem runs (4 FPS, no progress) and the movie sound crackles: not shipped until both are fixed.
+rem VDEC_SEQDONE_ASYNC_MS=30: SEQDONE after cellVdecEndSeq comes from a helper thread, as on the console;
+rem synchronous, the first movie's teardown raced the second one (memory corrupted at "GameIntro").
+rem Keep run.bat, run_lan.bat and portable.cpp's list the same.
+if not defined PORT_PLAY_VIDEOS set "PORT_PLAY_VIDEOS=0"
+if not defined VDEC_SEQDONE_ASYNC_MS set "VDEC_SEQDONE_ASYNC_MS=30"
 if not defined GCM_SEMA_ACQUIRE set "GCM_SEMA_ACQUIRE=1"
 if not defined GCM_SEMA_ACQUIRE_MS set "GCM_SEMA_ACQUIRE_MS=250"
 rem D3D12 per-frame vertex buffer: a race frame needs ~2.2M (default 393216: its main pass and

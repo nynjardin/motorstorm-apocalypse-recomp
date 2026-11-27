@@ -46,6 +46,7 @@ if not exist "%BUILD%\CMakeCache.txt" (
     -DCMAKE_BUILD_TYPE=Release ^
     "-DCMAKE_C_FLAGS=/DWIN32 /D_WINDOWS %PGOF%" "-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /EHsc %PGOF%" ^
     -DPS3RECOMP_DIR=I:/Projets/Recomp/ps3recomp ^
+    -DPS3RECOMP_FFMPEG_RUNTIME=ON "-DPS3RECOMP_FFMPEG_INCLUDE_DIR=E:/ms_perf/ffmpeg/ffmpeg-n8.1-latest-win64-lgpl-shared-8.1/include" ^
     -DRECOMP_DIR=%RECOMP% ^
     -DPython3_EXECUTABLE=I:/Projets/Recomp/.venv/Scripts/python.exe ^
     -DPORT_ENABLE_SPU=ON -DPORT_SPU_INPUTS= %FFOPT% "%FXOPT%" "-DPORT_SPU_FLOAT_EXACT_DEFS=%PORT_SPU_FLOAT_EXACT_DEFS%" || exit /b 1

@@ -680,14 +680,27 @@ static void port_cellSpursTryJoinTask2(ppu_context* c)
     c->gpr[3] = rc;
 }
 
+extern "C" const void* ps3_ffmpeg_get(void);   /* toolkit libs/codec/ffmpeg_runtime.c: NULL = no FFmpeg */
+
 extern "C" void port_register_hle_overrides(void)
 {
     ps3_hle_register_ctx(0x838FA4F0u, "cellSpursTryJoinTask2", port_cellSpursTryJoinTask2);
     ps3_hle_register_ctx(0xE0A6DBE4u, "_cellSpursSendSignal", port_cellSpursSendSignal);
     if (!std::getenv("PORT_NETCTL_TOOLKIT"))
         ps3_hle_register_ctx(0x8B3EBA69u, "cellNetCtlGetState", port_cellNetCtlGetState);
-    if (!std::getenv("PORT_PLAY_VIDEOS"))
-        ps3_hle_register_fast(0x718BF5F8u /* cellFsOpen */, port_cellFsOpen_skip_videos);
+    /* The movies play when PORT_PLAY_VIDEOS is set and not 0 (run.bat / portable.cpp: 1) AND the
+     * toolkit found FFmpeg (avcodec-NN.dll beside the exe): without a decoder they stall, so they
+     * are skipped (short copy) instead. docs\hle.md "Movies". */
+    {
+        const char* pv = std::getenv("PORT_PLAY_VIDEOS");
+        bool play = pv && *pv && std::strcmp(pv, "0") != 0;
+        if (play && !ps3_ffmpeg_get()) {
+            std::fprintf(stderr, "[port] PORT_PLAY_VIDEOS set but FFmpeg not found: movies skipped\n");
+            play = false;
+        }
+        if (!play)
+            ps3_hle_register_fast(0x718BF5F8u /* cellFsOpen */, port_cellFsOpen_skip_videos);
+    }
     /* run.bat redirects stdout to a file: fully buffered, so whatever the HLE
      * printf'd last was lost when a run was killed, and the log looked like the
      * title had stopped earlier than it had. stderr is already unbuffered. */

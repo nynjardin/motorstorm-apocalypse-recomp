@@ -56,6 +56,12 @@ Put $Launcher (Join-Path $GameDir 'Launcher.exe')
 foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
     Put (Join-Path $env:SystemRoot "System32\$dll") (Join-Path $GameDir $dll)
 }
+# FFmpeg (LGPL, shared build, never in Git): the movies are decoded with it (XVID video, AC-3 audio);
+# loaded at run time by the toolkit, beside the exe. Without these three DLLs the movies are skipped.
+$ffbin = 'E:\ms_perf\ffmpeg\ffmpeg-n8.1-latest-win64-lgpl-shared-8.1\bin'
+foreach ($dll in 'avcodec-62.dll', 'avutil-60.dll', 'swresample-6.dll') {
+    Put (Join-Path $ffbin $dll) (Join-Path $GameDir $dll)
+}
 Put (Join-Path $repo 'game\BCES00484\EBOOT.elf') (Join-Path $data 'EBOOT.elf')
 Put (Join-Path $repo 'port\psarc_patches.bin') (Join-Path $data 'psarc_patches.bin')
 Put (Join-Path $repo 'work\firmware\libsre\libsre_image.bin') (Join-Path $data 'libsre_image.bin')

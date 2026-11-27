@@ -11,8 +11,1106 @@ index b975293d..72208f94 100644
  };
  
  /* selectany (a COMDAT "any": one definition kept, every object sees the same
+diff --git a/libs/codec/cellAdec.c b/libs/codec/cellAdec.c
+index c32d7676..1051a40a 100644
+--- a/libs/codec/cellAdec.c
++++ b/libs/codec/cellAdec.c
+@@ -1,546 +1,547 @@
+-/*
+- * ps3recomp - cellAdec HLE implementation
+- *
+- * Audio decoder. Accepts AU data and delivers AUDONE + PCMOUT callbacks.
+- * AC3 decodes through FFmpeg loaded at run time (PS3RECOMP_FFMPEG_RUNTIME,
+- * ffmpeg_runtime.c, the loader cellVdec uses) into interleaved big-endian
+- * float PCM, one 1536-sample frame per AU in the stream's own channels.
+- * Every other codec, and AC3 when FFmpeg is absent or PS3RECOMP_FFMPEG=0,
+- * delivers silence of the codec's frame size.
+- */
+-
+-#include "cellAdec.h"
+-#include <stdio.h>
+-#include <stdlib.h>   /* getenv -- an implicit decl returns int, truncating the pointer */
+-#include <string.h>
+-#include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
+-#include "../../runtime/ppu/ppu_context.h" /* g_active_ctx -> the guest lr */
+-#include "../guest_struct.h"   /* GUEST_EA, guest_struct_load/store */
+-#include "ps3emu/guest_call.h" /* g_ps3_guest_caller -- cbFunc is a GUEST OPD */
+-#include "../../runtime/memory/vm.h"     /* VM_HLE_INJECT_BASE */
+-#include "ps3emu/log_first.h"
+-#include "ffmpeg_runtime.h"   /* PS3FFmpeg; empty without PS3RECOMP_FFMPEG_RUNTIME */
+-
+-/* CellAdecPcmItem as the guest reads it, from RPCS3 Modules/cellAdec.h:339.
+- * ps1_netemu copies the whole thing out with six 8-byte loads from offsets
+- * 0x00..0x28 (at 0x000ED964), and that copy is what confirms these offsets
+- * rather than a guess about padding: auInfo lands at 0x18, not 0x14, because it
+- * contains a u64. The block must be 0x30 readable GUEST bytes. */
+-#define PCMITEM_PCM_HANDLE   0x00u
+-#define PCMITEM_STATUS       0x04u
+-#define PCMITEM_START_ADDR   0x08u
+-#define PCMITEM_SIZE         0x0Cu
+-#define PCMITEM_BSI_INFO     0x10u
+-#define PCMITEM_AU_START     0x18u
+-#define PCMITEM_AU_SIZE      0x1Cu
+-#define PCMITEM_AU_PTS_HI    0x20u
+-#define PCMITEM_AU_PTS_LO    0x24u
+-#define PCMITEM_AU_USERDATA  0x28u
+-#define PCMITEM_BYTES        0x30u
+-
+-/* PCM per AU, float (4 bytes a sample), interleaved.
+- *  - AC3: one A/52 frame is 1536 samples (6 blocks of 256) in the frame's own
+- *    channels (acmod + LFE from its header: 6 for a 5.1 track). A movie
+- *    player that sizes its ring as channels x 4 bytes a sample and takes each
+- *    AU's PCM size from bsiInfo+0x14 needs the block to be the real frame:
+- *    1024 stereo samples (8 KB) fed its 5.1 mixer a third of the audio an AU
+- *    stands for.
+- *  - the other codecs: 1024 stereo float samples of silence, the ATRAC3 frame
+- *    the first title on this stub (codecType 5) decodes. */
+-#define ADEC_PCM_SAMPLES  1024u
+-#define ADEC_PCM_BYTES    (ADEC_PCM_SAMPLES * 2u * 4u)
+-#define ADEC_AC3_SAMPLES  1536u
+-/* The largest block one AU produces here: an AC3 frame in 7.1. */
+-#define ADEC_PCM_MAX_BYTES (ADEC_AC3_SAMPLES * 8u * 4u)
+-
+-/* Guest-visible scratch, in the HLE inject window rather than from the guest's
+- * own heap. Taking 8 KB out of that heap in cellAdecOpen stalled the title
+- * before it even reached cellAdecStartSeq -- ps1_netemu allocates its own
+- * buffers from the same bump allocator, and perturbing it is not worth it for
+- * two fixed-size blocks whose lifetime is the whole process.
+- *
+- * +0x40000 is clear of everything else in the window: labels +0x0000, control
+- * +0x2000, callback +0x2F00, the offset tables +0x3000/+0x5000, and sys_rsx's
+- * device/driver-info/reports pages at +0x30000/+0x31000/+0x38000. */
+-#define ADEC_SCRATCH_BASE   (VM_HLE_INJECT_BASE + 0x40000u)
+-#define ADEC_SCRATCH_STRIDE 0x4000u
+-#define ADEC_ITEM_EA(h)     (ADEC_SCRATCH_BASE + (u32)(h) * ADEC_SCRATCH_STRIDE)
+-/* The PCM block is up to 48 KB (ADEC_PCM_MAX_BYTES), more than the 16 KB
+- * stride holds, so it lives in its own 64 KB per handle at +0x80000..+0xC0000,
+- * past cellVdec's pic items at +0x50000. */
+-#define ADEC_PCM_EA(h)      (VM_HLE_INJECT_BASE + 0x80000u + (u32)(h) * 0x10000u)
+-/* The codec info block the PcmItem's bsiInfo points to, in the gap between
+- * the 0x30-byte item and the PCM buffer. */
+-#define ADEC_BSI_EA(h)      (ADEC_ITEM_EA(h) + 0x40u)
+-#define ADEC_BSI_BYTES      0x40u
+-
+-/* ---------------------------------------------------------------------------
+- * Internal state
+- * -----------------------------------------------------------------------*/
+-#define MAX_ADEC 4
+-
+-typedef struct {
+-    int in_use;
+-    u32 codecType;
+-    u32 cbFunc;         /* guest EA of the callback's OPD */
+-    u32 cbArg;          /* guest EA handed back to it     */
+-    int seqStarted;
+-    u32 itemEa;         /* guest EA of the 0x30-byte CellAdecPcmItem */
+-    u32 pcmEa;          /* guest EA of the PCM buffer it points at    */
+-    int hasPcm;
+-    u32 pcmBytes;       /* size of the PCM block at pcmEa */
+-    u32 auCount;        /* total AUs decoded */
+-    void* ff;           /* AdecFf: the libavcodec decoder, or NULL */
+-    u8* au;             /* host copy of the AU being decoded */
+-    u32 auCap;
+-} AdecSlot;
+-
+-static AdecSlot s_adec[MAX_ADEC];
+-
+-/* ---------------------------------------------------------------------------
+- * AC3 frame header: the frame's channel count (A/52 5.4.2), for the size of
+- * the silent block when there is no decoder. 0 when it is not an AC3 frame.
+- * -----------------------------------------------------------------------*/
+-static u32 adec_ac3_channels(const u8* f, u32 n)
+-{
+-    static const u8 nfchans[8] = { 2, 1, 2, 3, 3, 4, 4, 5 };
+-    if (!f || n < 8 || f[0] != 0x0B || f[1] != 0x77) return 0;
+-    if ((f[5] >> 3) > 10) return 0;          /* bsid > 10: E-AC3, not parsed */
+-    u32 bits = ((u32)f[6] << 8) | f[7];      /* acmod(3) [cmixlev surmixlev dsurmod] lfeon */
+-    u32 acmod = bits >> 13;
+-    int pos = 3;
+-    if ((acmod & 1u) && acmod != 1u) pos += 2;   /* cmixlev */
+-    if (acmod & 4u) pos += 2;                    /* surmixlev */
+-    if (acmod == 2u) pos += 2;                   /* dsurmod */
+-    return nfchans[acmod] + ((bits >> (15 - pos)) & 1u);
+-}
+-
+-/* ---------------------------------------------------------------------------
+- * libavcodec back end (AC3)
+- * -----------------------------------------------------------------------*/
+-#ifdef PS3RECOMP_FFMPEG_RUNTIME
+-
+-typedef struct AdecFf {
+-    const PS3FFmpeg* ff;
+-    AVCodecContext* ctx;
+-    AVPacket* pkt;
+-    AVFrame* frame;
+-    u8* buf;            /* the AU plus FFmpeg's zeroed input padding */
+-    u32 bufCap;
+-    u32* pcm;           /* big-endian float words, ADEC_PCM_MAX_BYTES */
+-} AdecFf;
+-
+-static void adec_ff_close(void* p)
+-{
+-    AdecFf* d = (AdecFf*)p;
+-    if (!d) return;
+-    if (d->ctx) d->ff->avcodec_free_context(&d->ctx);
+-    if (d->pkt) d->ff->av_packet_free(&d->pkt);
+-    if (d->frame) d->ff->av_frame_free(&d->frame);
+-    free(d->buf);
+-    free(d->pcm);
+-    free(d);
+-}
+-
+-static void* adec_ff_open(u32 codec_type)
+-{
+-    if (codec_type != CELL_ADEC_TYPE_AC3) return NULL;
+-    const PS3FFmpeg* ff = ps3_ffmpeg_get();
+-    if (!ff) return NULL;
+-    const AVCodec* codec = ff->avcodec_find_decoder(AV_CODEC_ID_AC3);
+-    if (!codec) {
+-        printf("[cellAdec] libavcodec has no AC3 decoder; silence\n");
+-        return NULL;
+-    }
+-    AdecFf* d = (AdecFf*)calloc(1, sizeof(*d));
+-    if (!d) return NULL;
+-    d->ff = ff;
+-    d->ctx = ff->avcodec_alloc_context3(codec);
+-    d->pkt = ff->av_packet_alloc();
+-    d->frame = ff->av_frame_alloc();
+-    d->pcm = (u32*)malloc(ADEC_PCM_MAX_BYTES);
+-    if (!d->ctx || !d->pkt || !d->frame || !d->pcm ||
+-        ff->avcodec_open2(d->ctx, codec, NULL) < 0) {
+-        printf("[cellAdec] could not open the libavcodec AC3 decoder; silence\n");
+-        adec_ff_close(d);
+-        return NULL;
+-    }
+-    return d;
+-}
+-
+-static void adec_ff_flush(void* p)
+-{
+-    AdecFf* d = (AdecFf*)p;
+-    if (d) d->ff->avcodec_flush_buffers(d->ctx);
+-}
+-
+-static float adec_ff_sample(const AVFrame* f, int ch, int c, int s)
+-{
+-    const u8* const* x = (const u8* const*)f->extended_data;
+-    switch (f->format) {
+-    case AV_SAMPLE_FMT_FLTP: return ((const float*)x[c])[s];
+-    case AV_SAMPLE_FMT_FLT:  return ((const float*)x[0])[s * ch + c];
+-    case AV_SAMPLE_FMT_S16P: return ((const int16_t*)x[c])[s] * (1.0f / 32768.0f);
+-    case AV_SAMPLE_FMT_S16:  return ((const int16_t*)x[0])[s * ch + c] * (1.0f / 32768.0f);
+-    case AV_SAMPLE_FMT_S32P: return (float)((const int32_t*)x[c])[s] * (1.0f / 2147483648.0f);
+-    case AV_SAMPLE_FMT_S32:  return (float)((const int32_t*)x[0])[s * ch + c] * (1.0f / 2147483648.0f);
+-    default:                 return 0.0f;
+-    }
+-}
+-
+-/* Decode one AU and store its PCM at guest dst as interleaved big-endian
+- * float, frame after frame. Returns the bytes stored (0: nothing came out);
+- * *channels gets the last frame's channel count. */
+-static u32 adec_ff_decode(void* p, const u8* au, u32 size, u32 dst, u32* channels)
+-{
+-    AdecFf* d = (AdecFf*)p;
+-    const PS3FFmpeg* ff = d->ff;
+-    if (size + AV_INPUT_BUFFER_PADDING_SIZE > d->bufCap) {
+-        u8* nb = (u8*)realloc(d->buf, size + AV_INPUT_BUFFER_PADDING_SIZE);
+-        if (!nb) return 0;
+-        d->buf = nb;
+-        d->bufCap = size + AV_INPUT_BUFFER_PADDING_SIZE;
+-    }
+-    memcpy(d->buf, au, size);
+-    memset(d->buf + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+-    d->pkt->data = d->buf;
+-    d->pkt->size = (int)size;
+-    int r = ff->avcodec_send_packet(d->ctx, d->pkt);
+-    d->pkt->data = NULL;
+-    d->pkt->size = 0;
+-    u32 out = 0;
+-    if (r < 0) {
+-        static int _n = 0;
+-        if (PS3_LOG_FIRST(_n, 8))
+-            printf("[cellAdec] AC3 AU of %u bytes did not decode (%d)\n", size, r);
+-    }
+-    for (;;) {
+-        AVFrame* f = d->frame;
+-        if (ff->avcodec_receive_frame(d->ctx, f) < 0)
+-            break;                                  /* EAGAIN / EOF / error */
+-        int ch = f->ch_layout.nb_channels, ns = f->nb_samples;
+-        u32 bytes = (u32)ns * (u32)ch * 4u;
+-        if (ch < 1 || ch > 8 || ns <= 0 || out + bytes > ADEC_PCM_MAX_BYTES) {
+-            static int _n = 0;
+-            if (PS3_LOG_FIRST(_n, 4))
+-                printf("[cellAdec] dropping a decoded frame (%d samples x %d ch, %u bytes held)\n",
+-                       ns, ch, out);
+-            ff->av_frame_unref(f);
+-            continue;
+-        }
+-        u32 i = 0;
+-        for (int s = 0; s < ns; s++)
+-            for (int c = 0; c < ch; c++) {
+-                float v = adec_ff_sample(f, ch, c, s);
+-                u32 w;
+-                memcpy(&w, &v, 4);
+-                d->pcm[i++] = (w >> 24) | ((w >> 8) & 0xFF00u) | ((w << 8) & 0xFF0000u) | (w << 24);
+-            }
+-        vm_memcpy_to(dst + out, d->pcm, bytes);
+-        { static int _n = 0;
+-          if (PS3_LOG_FIRST(_n, 1))
+-              printf("[cellAdec] AC3 through libavcodec: %d samples x %d ch at %d Hz, %u bytes an AU\n",
+-                     ns, ch, f->sample_rate, bytes); }
+-        out += bytes;
+-        *channels = (u32)ch;
+-        ff->av_frame_unref(f);
+-    }
+-    return out;
+-}
+-
+-#else /* !PS3RECOMP_FFMPEG_RUNTIME */
+-
+-static void* adec_ff_open(u32 codec_type) { (void)codec_type; return NULL; }
+-static void  adec_ff_close(void* p) { (void)p; }
+-static void  adec_ff_flush(void* p) { (void)p; }
+-static u32   adec_ff_decode(void* p, const u8* au, u32 size, u32 dst, u32* channels)
+-{ (void)p; (void)au; (void)size; (void)dst; (void)channels; return 0; }
+-
+-#endif /* PS3RECOMP_FFMPEG_RUNTIME */
+-
+-/* Fire one guest callback.
+- *
+- * The guest's cbFunc is a guest EA naming an OPD, so it goes through the
+- * recompiled code's dispatcher. It used to be cast to a host function pointer
+- * and called directly, which jumped to the guest address as host code:
+- *
+- *     [CRASH] code=0xC0000005 rip=00000000001B5F00
+- *     [CRASH] last HLE NID (cellAdecDecodeAu)
+- *
+- * 0x1B5F00 is the guest OPD. That crash is what this function exists to stop.
+- *
+- * ponytail: dispatched SYNCHRONOUSLY on the caller's thread rather than from a
+- * decoder thread as lv2 does. The ceiling is a guest callback that blocks
+- * waiting on the thread that called DecodeAu -- give this its own thread if a
+- * title ever deadlocks here. */
+-static void adec_notify(CellAdecHandle handle, u32 msg_type, s32 msg_data)
+-{
+-    if (handle >= MAX_ADEC || !s_adec[handle].in_use) return;
+-    const AdecSlot* a = &s_adec[handle];
+-    { static int _n = 0;
+-      if (PS3_LOG_FIRST(_n, 4))
+-          printf("[cellAdec] notify h=%u msg=%u data=0x%X cb=0x%08X arg=0x%08X caller=%d\n",
+-                 handle, msg_type, (unsigned)msg_data, a->cbFunc, a->cbArg,
+-                 g_ps3_guest_caller ? 1 : 0); }
+-    if (!a->cbFunc || !g_ps3_guest_caller) return;
+-    g_ps3_guest_caller(a->cbFunc, (u64)handle, (u64)msg_type,
+-                       (u64)(s64)msg_data, (u64)a->cbArg, 0, 0, 0, 0);
+-}
+-
+-/* ---------------------------------------------------------------------------
+- * API implementations
+- * -----------------------------------------------------------------------*/
+-
+-/* cellAdecQueryAttr: how much work memory the decoder wants, before Open.
+- * CellAdecAttr (guest, big-endian): +0 u32 workMemSize, +4 u32 adecVerUpper,
+- * +8 u32 adecVerLower. Decoding is host-side and never touches the buffer;
+- * see cellVdecQueryAttr. */
+-s32 cellAdecQueryAttr(const CellAdecType* type, void* attr)
+-{
+-    u32 ea = (u32)(uintptr_t)attr;
+-    if (!type || !ea)
+-        return (s32)CELL_ADEC_ERROR_ARG;
+-    vm_write32(ea + 0x0, 0x40000);    /* workMemSize: 256 KB */
+-    vm_write32(ea + 0x4, 0x00010000); /* adecVerUpper */
+-    vm_write32(ea + 0x8, 0);          /* adecVerLower */
+-    return CELL_OK;
+-}
+-
+-/* cellAdecOpen(type, res, cb, handle) -- FOUR arguments.
+- *
+- * This took five, splitting the guest's CellAdecCb struct into cbFunc + cbArg,
+- * which pushed `handle` off r6 onto r7. r7 held whatever happened to be there, so
+- * the null check failed and every Open returned CELL_ADEC_ERROR_ARG. ps1_netemu
+- * opens a decoder for CD-DA/XA audio inside its CD-ROM constructor and gives up on
+- * the error -- so the disc was never mounted and the emulator sat in its run loop
+- * with nothing to run. Signature confirmed against RPCS3 (Modules/cellAdec.cpp).
+- *
+- * cb is a guest pointer to { u32 cbFunc; u32 cbArg; }. */
+-s32 cellAdecOpen(const CellAdecType* type, const CellAdecResource* res,
+-                 const CellAdecCb* cb, CellAdecHandle* handle)
+-{
+-    (void)res;
+-
+-    u32 codec_type = type ? vm_read32(GUEST_EA(type)) : 0;   /* audioCodecType */
+-    u32 cb_ea      = (u32)(uintptr_t)cb;
+-    u32 handle_ea  = (u32)(uintptr_t)handle;
+-    printf("[cellAdec] Open(codecType=%u, cb=0x%08X, handle=0x%08X)\n",
+-           codec_type, cb_ea, handle_ea);
+-
+-    if (!type || !handle_ea)
+-        return (s32)CELL_ADEC_ERROR_ARG;
+-
+-    for (int i = 0; i < MAX_ADEC; i++) {
+-        if (!s_adec[i].in_use) {
+-            memset(&s_adec[i], 0, sizeof(AdecSlot));
+-            s_adec[i].in_use    = 1;
+-            s_adec[i].codecType = codec_type;
+-            if (cb_ea) {
+-                s_adec[i].cbFunc = vm_read32(cb_ea + 0);
+-                s_adec[i].cbArg  = vm_read32(cb_ea + 4);
+-            }
+-            /* The PcmItem is handed to the guest BY POINTER, so it cannot live
+-             * in host memory -- returning &host_struct is what crashed here
+-             * once already. */
+-            s_adec[i].itemEa = ADEC_ITEM_EA(i);
+-            s_adec[i].pcmEa  = ADEC_PCM_EA(i);
+-            s_adec[i].ff     = adec_ff_open(codec_type);
+-            vm_write32(handle_ea, (u32)i);
+-            printf("[cellAdec] Open -> handle=%u item=0x%08X pcm=0x%08X%s\n",
+-                   i, s_adec[i].itemEa, s_adec[i].pcmEa,
+-                   s_adec[i].ff ? " (decoding with libavcodec)" : "");
+-            return CELL_OK;
+-        }
+-    }
+-    return (s32)CELL_ADEC_ERROR_BUSY;
+-}
+-
+-s32 cellAdecClose(CellAdecHandle handle)
+-{
+-    printf("[cellAdec] Close(handle=%u)\n", handle);
+-
+-    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
+-        return (s32)CELL_ADEC_ERROR_ARG;
+-
+-    adec_ff_close(s_adec[handle].ff);
+-    free(s_adec[handle].au);
+-    s_adec[handle].ff = NULL;
+-    s_adec[handle].au = NULL;
+-    s_adec[handle].auCap = 0;
+-    s_adec[handle].in_use = 0;
+-    return CELL_OK;
+-}
+-
+-s32 cellAdecStartSeq(CellAdecHandle handle, void* param)
+-{
+-    (void)param;
+-    printf("[cellAdec] StartSeq(handle=%u)\n", handle);
+-
+-    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
+-        return (s32)CELL_ADEC_ERROR_ARG;
+-
+-    s_adec[handle].seqStarted = 1;
+-    adec_ff_flush(s_adec[handle].ff);   /* a new sequence starts clean */
+-    return CELL_OK;
+-}
+-
+-s32 cellAdecEndSeq(CellAdecHandle handle)
+-{
+-    /* ADEC_WHO=1: name the guest function driving this. The title calls EndSeq
+-     * hundreds of times against a single StartSeq, and the image has eight
+-     * EndSeq call sites -- the backtrace says which one. */
+-    { static int _n = -1;
+-      if (_n < 0) _n = getenv("ADEC_WHO") ? 0 : -2;
+-      if (_n >= 0 && _n < 8) { _n++;
+-          /* The guest lr, not a host backtrace. ppu_guest_caller maps host
+-           * frames to the nearest lifted function, and here it landed on
+-           * func_00013040 -- a single `blr`, so plainly a mis-attribution.
+-           * lr is written by the `bl` to the import stub, so it is exactly
+-           * (call site + 4) for a call like this one. */
+-          extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
+-          printf("[cellAdec] EndSeq from guest lr=0x%08X tid=%llu\n",
+-                 g_active_ctx ? (u32)g_active_ctx->lr : 0u,
+-                 g_active_ctx ? (unsigned long long)g_active_ctx->thread_id : 0ull); } }
+-    printf("[cellAdec] EndSeq(handle=%u)\n", handle);
+-
+-    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
+-        return (s32)CELL_ADEC_ERROR_ARG;
+-
+-    s_adec[handle].seqStarted = 0;
+-
+-    adec_notify(handle, CELL_ADEC_MSG_TYPE_SEQDONE, CELL_OK);
+-
+-    return CELL_OK;
+-}
+-
+-s32 cellAdecDecodeAu(CellAdecHandle handle, const CellAdecAuInfo* auInfo)
+-{
+-    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
+-        return (s32)CELL_ADEC_ERROR_ARG;
+-    if (!auInfo)
+-        return (s32)CELL_ADEC_ERROR_ARG;
+-
+-    AdecSlot* a = &s_adec[handle];
+-    const u32 au = GUEST_EA(auInfo);
+-    const u32 au_addr = vm_read32(au + (u32)offsetof(CellAdecAuInfo, startAddr));
+-    const u32 au_size = vm_read32(au + (u32)offsetof(CellAdecAuInfo, size));
+-    /* The AU info, read before AUDONE gives it back to the title. */
+-    const u32 au_w[4] = { vm_read32(au + 0x08), vm_read32(au + 0x0C),
+-                          vm_read32(au + 0x10), vm_read32(au + 0x14) };
+-
+-    printf("[cellAdec] DecodeAu(handle=%u, addr=0x%X, size=%u)\n",
+-           handle, au_addr, au_size);
+-
+-    /* The AC3 bytes are copied out first, too: AUDONE hands their buffer back
+-     * to the title's demuxer, which may refill it at once. */
+-    const u8* data = NULL;
+-    if (a->codecType == CELL_ADEC_TYPE_AC3 && au_addr && au_size && au_size <= 0x10000u) {
+-        if (au_size > a->auCap) {
+-            u8* nb = (u8*)realloc(a->au, au_size);
+-            if (nb) { a->au = nb; a->auCap = au_size; }
+-        }
+-        if (au_size <= a->auCap) {
+-            vm_memcpy_from(a->au, au_addr, au_size);
+-            data = a->au;
+-        }
+-    }
+-
+-    /* Step 1: report the AU consumed. msgData is the AU INFO ADDRESS, not a
+-     * status -- see RPCS3 Modules/cellAdec.cpp:1345. A decoder that tracks its
+-     * outstanding AUs by address gets a null back if this is CELL_OK. */
+-    adec_notify(handle, CELL_ADEC_MSG_TYPE_AUDONE, (s32)au);
+-
+-    /* Step 2: the PCM. AC3 through libavcodec when it is there; otherwise
+-     * silence of the codec's frame size (AC3: 1536 samples in the frame's
+-     * channels), so a title that counts PCM against time still runs. */
+-    a->auCount++;
+-    {
+-        const u32 it = a->itemEa;
+-        u32 ch = 0;
+-        u32 bytes = (a->ff && data) ? adec_ff_decode(a->ff, data, au_size, a->pcmEa, &ch) : 0;
+-        if (bytes == 0) {
+-            if (a->codecType == CELL_ADEC_TYPE_AC3) {
+-                ch = adec_ac3_channels(data, data ? au_size : 0);
+-                bytes = ADEC_AC3_SAMPLES * (ch ? ch : 2u) * 4u;
+-            } else {
+-                bytes = ADEC_PCM_BYTES;
+-            }
+-            vm_memset(a->pcmEa, 0, bytes);
+-        }
+-        a->pcmBytes = bytes;
+-
+-        vm_write32(it + PCMITEM_PCM_HANDLE, (u32)handle);
+-        vm_write32(it + PCMITEM_STATUS,     0);              /* CELL_OK */
+-        vm_write32(it + PCMITEM_START_ADDR, a->pcmEa);
+-        vm_write32(it + PCMITEM_SIZE,       bytes);
+-        /* bsiInfo must point at a codec info block, not be null. Resistance:
+-         * Fall of Man sizes each AC3 block from bsiInfo+0x14; with a null
+-         * pointer that read address 0x14 and came back 0, so its ring buffer
+-         * never filled, it never started its audio port, and its movie player
+-         * waited forever. Other titles' PCMOUT handlers take the AU's
+-         * PCM size from the same word. ponytail: only that output-size word is
+-         * filled; the rest of the block is zero until a title reads another
+-         * field. */
+-        const u32 bsi = ADEC_BSI_EA(handle);
+-        for (u32 o = 0; o < ADEC_BSI_BYTES; o += 4) vm_write32(bsi + o, 0);
+-        vm_write32(bsi + 0x14, bytes);
+-        vm_write32(it + PCMITEM_BSI_INFO,   bsi);
+-        /* Echo the AU back, which is what a real decoder does -- the guest
+-         * matches returned PCM against the AU it submitted. */
+-        vm_write32(it + PCMITEM_AU_START,        au_addr);
+-        vm_write32(it + PCMITEM_AU_SIZE,         au_size);
+-        vm_write32(it + PCMITEM_AU_PTS_HI,       au_w[0]);
+-        vm_write32(it + PCMITEM_AU_PTS_LO,       au_w[1]);
+-        vm_write32(it + PCMITEM_AU_USERDATA,     au_w[2]);
+-        vm_write32(it + PCMITEM_AU_USERDATA + 4, au_w[3]);
+-    }
+-    a->hasPcm = 1;
+-
+-    adec_notify(handle, CELL_ADEC_MSG_TYPE_PCMOUT, CELL_OK);
+-
+-    return CELL_OK;
+-}
+-
+-s32 cellAdecGetPcm(CellAdecHandle handle, void* outBuffer)
+-{
+-    { static int _n = 0; if (PS3_LOG_FIRST(_n, 6))
+-        printf("[cellAdec] GetPcm(handle=%u out=0x%08X)\n",
+-               handle, GUEST_EA(outBuffer)); }
+-    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
+-        return (s32)CELL_ADEC_ERROR_ARG;
+-
+-    if (!s_adec[handle].hasPcm)
+-        return (s32)CELL_ADEC_ERROR_EMPTY;
+-
+-    /* outBuffer is the GUEST's buffer: the AU's PCM block goes there, the
+-     * size the item and bsiInfo+0x14 announced. Leaving it untouched hands the
+-     * title whatever happened to be there, which it then plays. */
+-    { const u32 out = GUEST_EA(outBuffer);
+-      const AdecSlot* a = &s_adec[handle];
+-      if (out && a->pcmBytes)
+-          vm_memcpy_to(out, vm_ptr8(a->pcmEa), a->pcmBytes); }
+-
+-    s_adec[handle].hasPcm = 0;
+-    return CELL_OK;
+-}
+-
+-s32 cellAdecGetPcmItem(CellAdecHandle handle, const CellAdecPcmItem** pcmItem)
+-{
+-    { static int _n = 0; if (PS3_LOG_FIRST(_n, 6))
+-        printf("[cellAdec] GetPcmItem(handle=%u out=0x%08X hasPcm=%d)\n",
+-               handle, GUEST_EA(pcmItem),
+-               handle < MAX_ADEC ? s_adec[handle].hasPcm : -1); }
+-    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
+-        return (s32)CELL_ADEC_ERROR_ARG;
+-
+-    if (!s_adec[handle].hasPcm)
+-        return (s32)CELL_ADEC_ERROR_EMPTY;
+-
+-    /* pcmItem is a GUEST CellAdecPcmItem**. Writing &host_struct here put a
+-     * HOST address into guest memory; the guest dereferenced it and died on a
+-     * wild address (rip 0x870D0E, fault 0xCFFDFFF0). Write the guest EA. */
+-    if (pcmItem)
+-        vm_write32(GUEST_EA(pcmItem), s_adec[handle].itemEa);
+-
+-    return CELL_OK;
+-}
++/*
++ * ps3recomp - cellAdec HLE implementation
++ *
++ * Audio decoder. Accepts AU data and delivers AUDONE + PCMOUT callbacks.
++ * AC3 decodes through FFmpeg loaded at run time (PS3RECOMP_FFMPEG_RUNTIME,
++ * ffmpeg_runtime.c, the loader cellVdec uses) into interleaved big-endian
++ * float PCM, one 1536-sample frame per AU in the stream's own channels.
++ * Every other codec, and AC3 when FFmpeg is absent or PS3RECOMP_FFMPEG=0,
++ * delivers silence of the codec's frame size.
++ */
++
++#include "cellAdec.h"
++#include <stdio.h>
++#include <stdlib.h>   /* getenv -- an implicit decl returns int, truncating the pointer */
++#include <string.h>
++#include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
++#include "../../runtime/ppu/ppu_context.h" /* g_active_ctx -> the guest lr */
++#include "../guest_struct.h"   /* GUEST_EA, guest_struct_load/store */
++#include "ps3emu/guest_call.h" /* g_ps3_guest_caller -- cbFunc is a GUEST OPD */
++#include "../../runtime/memory/vm.h"     /* VM_HLE_INJECT_BASE */
++#include "ps3emu/log_first.h"
++#include "ffmpeg_runtime.h"   /* PS3FFmpeg; empty without PS3RECOMP_FFMPEG_RUNTIME */
++
++/* CellAdecPcmItem as the guest reads it, from RPCS3 Modules/cellAdec.h:339.
++ * ps1_netemu copies the whole thing out with six 8-byte loads from offsets
++ * 0x00..0x28 (at 0x000ED964), and that copy is what confirms these offsets
++ * rather than a guess about padding: auInfo lands at 0x18, not 0x14, because it
++ * contains a u64. The block must be 0x30 readable GUEST bytes. */
++#define PCMITEM_PCM_HANDLE   0x00u
++#define PCMITEM_STATUS       0x04u
++#define PCMITEM_START_ADDR   0x08u
++#define PCMITEM_SIZE         0x0Cu
++#define PCMITEM_BSI_INFO     0x10u
++#define PCMITEM_AU_START     0x18u
++#define PCMITEM_AU_SIZE      0x1Cu
++#define PCMITEM_AU_PTS_HI    0x20u
++#define PCMITEM_AU_PTS_LO    0x24u
++#define PCMITEM_AU_USERDATA  0x28u
++#define PCMITEM_BYTES        0x30u
++
++/* PCM per AU, float (4 bytes a sample), interleaved.
++ *  - AC3: one A/52 frame is 1536 samples (6 blocks of 256) in the frame's own
++ *    channels (acmod + LFE from its header: 6 for a 5.1 track). A movie
++ *    player that sizes its ring as channels x 4 bytes a sample and takes each
++ *    AU's PCM size from bsiInfo+0x14 needs the block to be the real frame:
++ *    1024 stereo samples (8 KB) fed its 5.1 mixer a third of the audio an AU
++ *    stands for.
++ *  - the other codecs: 1024 stereo float samples of silence, the ATRAC3 frame
++ *    the first title on this stub (codecType 5) decodes. */
++#define ADEC_PCM_SAMPLES  1024u
++#define ADEC_PCM_BYTES    (ADEC_PCM_SAMPLES * 2u * 4u)
++#define ADEC_AC3_SAMPLES  1536u
++/* The largest block one AU produces here: an AC3 frame in 7.1. */
++#define ADEC_PCM_MAX_BYTES (ADEC_AC3_SAMPLES * 8u * 4u)
++
++/* Guest-visible scratch, in the HLE inject window rather than from the guest's
++ * own heap. Taking 8 KB out of that heap in cellAdecOpen stalled the title
++ * before it even reached cellAdecStartSeq -- ps1_netemu allocates its own
++ * buffers from the same bump allocator, and perturbing it is not worth it for
++ * two fixed-size blocks whose lifetime is the whole process.
++ *
++ * +0x40000 is clear of everything else in the window: labels +0x0000, control
++ * +0x2000, callback +0x2F00, the offset tables +0x3000/+0x5000, and sys_rsx's
++ * device/driver-info/reports pages at +0x30000/+0x31000/+0x38000. */
++#define ADEC_SCRATCH_BASE   (VM_HLE_INJECT_BASE + 0x40000u)
++#define ADEC_SCRATCH_STRIDE 0x4000u
++#define ADEC_ITEM_EA(h)     (ADEC_SCRATCH_BASE + (u32)(h) * ADEC_SCRATCH_STRIDE)
++/* The PCM block is up to 48 KB (ADEC_PCM_MAX_BYTES), more than the 16 KB
++ * stride holds, so it lives in its own 64 KB per handle at +0x80000..+0xC0000,
++ * past cellVdec's pic items at +0x50000. */
++#define ADEC_PCM_EA(h)      (VM_HLE_INJECT_BASE + 0x80000u + (u32)(h) * 0x10000u)
++/* The codec info block the PcmItem's bsiInfo points to, in the gap between
++ * the 0x30-byte item and the PCM buffer. */
++#define ADEC_BSI_EA(h)      (ADEC_ITEM_EA(h) + 0x40u)
++#define ADEC_BSI_BYTES      0x40u
++
++/* ---------------------------------------------------------------------------
++ * Internal state
++ * -----------------------------------------------------------------------*/
++#define MAX_ADEC 4
++
++typedef struct {
++    int in_use;
++    u32 codecType;
++    u32 cbFunc;         /* guest EA of the callback's OPD */
++    u32 cbArg;          /* guest EA handed back to it     */
++    int seqStarted;
++    u32 itemEa;         /* guest EA of the 0x30-byte CellAdecPcmItem */
++    u32 pcmEa;          /* guest EA of the PCM buffer it points at    */
++    int hasPcm;
++    u32 pcmBytes;       /* size of the PCM block at pcmEa */
++    u32 auCount;        /* total AUs decoded */
++    void* ff;           /* AdecFf: the libavcodec decoder, or NULL */
++    u8* au;             /* host copy of the AU being decoded */
++    u32 auCap;
++} AdecSlot;
++
++static AdecSlot s_adec[MAX_ADEC];
++
++/* ---------------------------------------------------------------------------
++ * AC3 frame header: the frame's channel count (A/52 5.4.2), for the size of
++ * the silent block when there is no decoder. 0 when it is not an AC3 frame.
++ * -----------------------------------------------------------------------*/
++static u32 adec_ac3_channels(const u8* f, u32 n)
++{
++    static const u8 nfchans[8] = { 2, 1, 2, 3, 3, 4, 4, 5 };
++    if (!f || n < 8 || f[0] != 0x0B || f[1] != 0x77) return 0;
++    if ((f[5] >> 3) > 10) return 0;          /* bsid > 10: E-AC3, not parsed */
++    u32 bits = ((u32)f[6] << 8) | f[7];      /* acmod(3) [cmixlev surmixlev dsurmod] lfeon */
++    u32 acmod = bits >> 13;
++    int pos = 3;
++    if ((acmod & 1u) && acmod != 1u) pos += 2;   /* cmixlev */
++    if (acmod & 4u) pos += 2;                    /* surmixlev */
++    if (acmod == 2u) pos += 2;                   /* dsurmod */
++    return nfchans[acmod] + ((bits >> (15 - pos)) & 1u);
++}
++
++/* ---------------------------------------------------------------------------
++ * libavcodec back end (AC3)
++ * -----------------------------------------------------------------------*/
++#ifdef PS3RECOMP_FFMPEG_RUNTIME
++
++typedef struct AdecFf {
++    const PS3FFmpeg* ff;
++    AVCodecContext* ctx;
++    AVPacket* pkt;
++    AVFrame* frame;
++    u8* buf;            /* the AU plus FFmpeg's zeroed input padding */
++    u32 bufCap;
++    u32* pcm;           /* big-endian float words, ADEC_PCM_MAX_BYTES */
++} AdecFf;
++
++static void adec_ff_close(void* p)
++{
++    AdecFf* d = (AdecFf*)p;
++    if (!d) return;
++    if (d->ctx) d->ff->avcodec_free_context(&d->ctx);
++    if (d->pkt) d->ff->av_packet_free(&d->pkt);
++    if (d->frame) d->ff->av_frame_free(&d->frame);
++    free(d->buf);
++    free(d->pcm);
++    free(d);
++}
++
++static void* adec_ff_open(u32 codec_type)
++{
++    if (codec_type != CELL_ADEC_TYPE_AC3) return NULL;
++    const PS3FFmpeg* ff = ps3_ffmpeg_get();
++    if (!ff) return NULL;
++    const AVCodec* codec = ff->avcodec_find_decoder(AV_CODEC_ID_AC3);
++    if (!codec) {
++        printf("[cellAdec] libavcodec has no AC3 decoder; silence\n");
++        return NULL;
++    }
++    AdecFf* d = (AdecFf*)calloc(1, sizeof(*d));
++    if (!d) return NULL;
++    d->ff = ff;
++    d->ctx = ff->avcodec_alloc_context3(codec);
++    d->pkt = ff->av_packet_alloc();
++    d->frame = ff->av_frame_alloc();
++    d->pcm = (u32*)malloc(ADEC_PCM_MAX_BYTES);
++    if (!d->ctx || !d->pkt || !d->frame || !d->pcm ||
++        ff->avcodec_open2(d->ctx, codec, NULL) < 0) {
++        printf("[cellAdec] could not open the libavcodec AC3 decoder; silence\n");
++        adec_ff_close(d);
++        return NULL;
++    }
++    return d;
++}
++
++static void adec_ff_flush(void* p)
++{
++    AdecFf* d = (AdecFf*)p;
++    if (d) d->ff->avcodec_flush_buffers(d->ctx);
++}
++
++static float adec_ff_sample(const AVFrame* f, int ch, int c, int s)
++{
++    const u8* const* x = (const u8* const*)f->extended_data;
++    switch (f->format) {
++    case AV_SAMPLE_FMT_FLTP: return ((const float*)x[c])[s];
++    case AV_SAMPLE_FMT_FLT:  return ((const float*)x[0])[s * ch + c];
++    case AV_SAMPLE_FMT_S16P: return ((const int16_t*)x[c])[s] * (1.0f / 32768.0f);
++    case AV_SAMPLE_FMT_S16:  return ((const int16_t*)x[0])[s * ch + c] * (1.0f / 32768.0f);
++    case AV_SAMPLE_FMT_S32P: return (float)((const int32_t*)x[c])[s] * (1.0f / 2147483648.0f);
++    case AV_SAMPLE_FMT_S32:  return (float)((const int32_t*)x[0])[s * ch + c] * (1.0f / 2147483648.0f);
++    default:                 return 0.0f;
++    }
++}
++
++/* Decode one AU and store its PCM at guest dst as interleaved big-endian
++ * float, frame after frame. Returns the bytes stored (0: nothing came out);
++ * *channels gets the last frame's channel count. */
++static u32 adec_ff_decode(void* p, const u8* au, u32 size, u32 dst, u32* channels)
++{
++    AdecFf* d = (AdecFf*)p;
++    const PS3FFmpeg* ff = d->ff;
++    if (size + AV_INPUT_BUFFER_PADDING_SIZE > d->bufCap) {
++        u8* nb = (u8*)realloc(d->buf, size + AV_INPUT_BUFFER_PADDING_SIZE);
++        if (!nb) return 0;
++        d->buf = nb;
++        d->bufCap = size + AV_INPUT_BUFFER_PADDING_SIZE;
++    }
++    memcpy(d->buf, au, size);
++    memset(d->buf + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
++    d->pkt->data = d->buf;
++    d->pkt->size = (int)size;
++    int r = ff->avcodec_send_packet(d->ctx, d->pkt);
++    d->pkt->data = NULL;
++    d->pkt->size = 0;
++    u32 out = 0;
++    if (r < 0) {
++        static int _n = 0;
++        if (PS3_LOG_FIRST(_n, 8))
++            printf("[cellAdec] AC3 AU of %u bytes did not decode (%d)\n", size, r);
++    }
++    for (;;) {
++        AVFrame* f = d->frame;
++        if (ff->avcodec_receive_frame(d->ctx, f) < 0)
++            break;                                  /* EAGAIN / EOF / error */
++        int ch = f->ch_layout.nb_channels, ns = f->nb_samples;
++        u32 bytes = (u32)ns * (u32)ch * 4u;
++        if (ch < 1 || ch > 8 || ns <= 0 || out + bytes > ADEC_PCM_MAX_BYTES) {
++            static int _n = 0;
++            if (PS3_LOG_FIRST(_n, 4))
++                printf("[cellAdec] dropping a decoded frame (%d samples x %d ch, %u bytes held)\n",
++                       ns, ch, out);
++            ff->av_frame_unref(f);
++            continue;
++        }
++        u32 i = 0;
++        for (int s = 0; s < ns; s++)
++            for (int c = 0; c < ch; c++) {
++                float v = adec_ff_sample(f, ch, c, s);
++                u32 w;
++                memcpy(&w, &v, 4);
++                d->pcm[i++] = (w >> 24) | ((w >> 8) & 0xFF00u) | ((w << 8) & 0xFF0000u) | (w << 24);
++            }
++        vm_memcpy_to(dst + out, d->pcm, bytes);
++        { static int _n = 0;
++          if (PS3_LOG_FIRST(_n, 1))
++              printf("[cellAdec] AC3 through libavcodec: %d samples x %d ch at %d Hz, %u bytes an AU\n",
++                     ns, ch, f->sample_rate, bytes); }
++        out += bytes;
++        *channels = (u32)ch;
++        ff->av_frame_unref(f);
++    }
++    return out;
++}
++
++#else /* !PS3RECOMP_FFMPEG_RUNTIME */
++
++static void* adec_ff_open(u32 codec_type) { (void)codec_type; return NULL; }
++static void  adec_ff_close(void* p) { (void)p; }
++static void  adec_ff_flush(void* p) { (void)p; }
++static u32   adec_ff_decode(void* p, const u8* au, u32 size, u32 dst, u32* channels)
++{ (void)p; (void)au; (void)size; (void)dst; (void)channels; return 0; }
++
++#endif /* PS3RECOMP_FFMPEG_RUNTIME */
++
++/* Fire one guest callback.
++ *
++ * The guest's cbFunc is a guest EA naming an OPD, so it goes through the
++ * recompiled code's dispatcher. It used to be cast to a host function pointer
++ * and called directly, which jumped to the guest address as host code:
++ *
++ *     [CRASH] code=0xC0000005 rip=00000000001B5F00
++ *     [CRASH] last HLE NID (cellAdecDecodeAu)
++ *
++ * 0x1B5F00 is the guest OPD. That crash is what this function exists to stop.
++ *
++ * ponytail: dispatched SYNCHRONOUSLY on the caller's thread rather than from a
++ * decoder thread as lv2 does. The ceiling is a guest callback that blocks
++ * waiting on the thread that called DecodeAu -- give this its own thread if a
++ * title ever deadlocks here. */
++static void adec_notify(CellAdecHandle handle, u32 msg_type, s32 msg_data)
++{
++    if (handle >= MAX_ADEC || !s_adec[handle].in_use) return;
++    const AdecSlot* a = &s_adec[handle];
++    { static int _n = 0;
++      if (PS3_LOG_FIRST(_n, 4))
++          printf("[cellAdec] notify h=%u msg=%u data=0x%X cb=0x%08X arg=0x%08X caller=%d\n",
++                 handle, msg_type, (unsigned)msg_data, a->cbFunc, a->cbArg,
++                 g_ps3_guest_caller ? 1 : 0); }
++    if (!a->cbFunc || !g_ps3_guest_caller) return;
++    g_ps3_guest_caller(a->cbFunc, (u64)handle, (u64)msg_type,
++                       (u64)(s64)msg_data, (u64)a->cbArg, 0, 0, 0, 0);
++}
++
++
++/* ---------------------------------------------------------------------------
++ * API implementations
++ * -----------------------------------------------------------------------*/
++
++/* cellAdecQueryAttr: how much work memory the decoder wants, before Open.
++ * CellAdecAttr (guest, big-endian): +0 u32 workMemSize, +4 u32 adecVerUpper,
++ * +8 u32 adecVerLower. Decoding is host-side and never touches the buffer;
++ * see cellVdecQueryAttr. */
++s32 cellAdecQueryAttr(const CellAdecType* type, void* attr)
++{
++    u32 ea = (u32)(uintptr_t)attr;
++    if (!type || !ea)
++        return (s32)CELL_ADEC_ERROR_ARG;
++    vm_write32(ea + 0x0, 0x40000);    /* workMemSize: 256 KB */
++    vm_write32(ea + 0x4, 0x00010000); /* adecVerUpper */
++    vm_write32(ea + 0x8, 0);          /* adecVerLower */
++    return CELL_OK;
++}
++
++/* cellAdecOpen(type, res, cb, handle) -- FOUR arguments.
++ *
++ * This took five, splitting the guest's CellAdecCb struct into cbFunc + cbArg,
++ * which pushed `handle` off r6 onto r7. r7 held whatever happened to be there, so
++ * the null check failed and every Open returned CELL_ADEC_ERROR_ARG. ps1_netemu
++ * opens a decoder for CD-DA/XA audio inside its CD-ROM constructor and gives up on
++ * the error -- so the disc was never mounted and the emulator sat in its run loop
++ * with nothing to run. Signature confirmed against RPCS3 (Modules/cellAdec.cpp).
++ *
++ * cb is a guest pointer to { u32 cbFunc; u32 cbArg; }. */
++s32 cellAdecOpen(const CellAdecType* type, const CellAdecResource* res,
++                 const CellAdecCb* cb, CellAdecHandle* handle)
++{
++    (void)res;
++
++    u32 codec_type = type ? vm_read32(GUEST_EA(type)) : 0;   /* audioCodecType */
++    u32 cb_ea      = (u32)(uintptr_t)cb;
++    u32 handle_ea  = (u32)(uintptr_t)handle;
++    printf("[cellAdec] Open(codecType=%u, cb=0x%08X, handle=0x%08X)\n",
++           codec_type, cb_ea, handle_ea);
++
++    if (!type || !handle_ea)
++        return (s32)CELL_ADEC_ERROR_ARG;
++
++    for (int i = 0; i < MAX_ADEC; i++) {
++        if (!s_adec[i].in_use) {
++            memset(&s_adec[i], 0, sizeof(AdecSlot));
++            s_adec[i].in_use    = 1;
++            s_adec[i].codecType = codec_type;
++            if (cb_ea) {
++                s_adec[i].cbFunc = vm_read32(cb_ea + 0);
++                s_adec[i].cbArg  = vm_read32(cb_ea + 4);
++            }
++            /* The PcmItem is handed to the guest BY POINTER, so it cannot live
++             * in host memory -- returning &host_struct is what crashed here
++             * once already. */
++            s_adec[i].itemEa = ADEC_ITEM_EA(i);
++            s_adec[i].pcmEa  = ADEC_PCM_EA(i);
++            s_adec[i].ff     = adec_ff_open(codec_type);
++            vm_write32(handle_ea, (u32)i);
++            printf("[cellAdec] Open -> handle=%u item=0x%08X pcm=0x%08X%s\n",
++                   i, s_adec[i].itemEa, s_adec[i].pcmEa,
++                   s_adec[i].ff ? " (decoding with libavcodec)" : "");
++            return CELL_OK;
++        }
++    }
++    return (s32)CELL_ADEC_ERROR_BUSY;
++}
++
++s32 cellAdecClose(CellAdecHandle handle)
++{
++    printf("[cellAdec] Close(handle=%u)\n", handle);
++
++    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
++        return (s32)CELL_ADEC_ERROR_ARG;
++
++    adec_ff_close(s_adec[handle].ff);
++    free(s_adec[handle].au);
++    s_adec[handle].ff = NULL;
++    s_adec[handle].au = NULL;
++    s_adec[handle].auCap = 0;
++    s_adec[handle].in_use = 0;
++    return CELL_OK;
++}
++
++s32 cellAdecStartSeq(CellAdecHandle handle, void* param)
++{
++    (void)param;
++    printf("[cellAdec] StartSeq(handle=%u)\n", handle);
++
++    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
++        return (s32)CELL_ADEC_ERROR_ARG;
++
++    s_adec[handle].seqStarted = 1;
++    adec_ff_flush(s_adec[handle].ff);   /* a new sequence starts clean */
++    return CELL_OK;
++}
++
++s32 cellAdecEndSeq(CellAdecHandle handle)
++{
++    /* ADEC_WHO=1: name the guest function driving this. The title calls EndSeq
++     * hundreds of times against a single StartSeq, and the image has eight
++     * EndSeq call sites -- the backtrace says which one. */
++    { static int _n = -1;
++      if (_n < 0) _n = getenv("ADEC_WHO") ? 0 : -2;
++      if (_n >= 0 && _n < 8) { _n++;
++          /* The guest lr, not a host backtrace. ppu_guest_caller maps host
++           * frames to the nearest lifted function, and here it landed on
++           * func_00013040 -- a single `blr`, so plainly a mis-attribution.
++           * lr is written by the `bl` to the import stub, so it is exactly
++           * (call site + 4) for a call like this one. */
++          extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
++          printf("[cellAdec] EndSeq from guest lr=0x%08X tid=%llu\n",
++                 g_active_ctx ? (u32)g_active_ctx->lr : 0u,
++                 g_active_ctx ? (unsigned long long)g_active_ctx->thread_id : 0ull); } }
++    printf("[cellAdec] EndSeq(handle=%u)\n", handle);
++
++    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
++        return (s32)CELL_ADEC_ERROR_ARG;
++
++    s_adec[handle].seqStarted = 0;
++
++    adec_notify(handle, CELL_ADEC_MSG_TYPE_SEQDONE, CELL_OK);
++
++    return CELL_OK;
++}
++
++s32 cellAdecDecodeAu(CellAdecHandle handle, const CellAdecAuInfo* auInfo)
++{
++    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
++        return (s32)CELL_ADEC_ERROR_ARG;
++    if (!auInfo)
++        return (s32)CELL_ADEC_ERROR_ARG;
++
++    AdecSlot* a = &s_adec[handle];
++    const u32 au = GUEST_EA(auInfo);
++    const u32 au_addr = vm_read32(au + (u32)offsetof(CellAdecAuInfo, startAddr));
++    const u32 au_size = vm_read32(au + (u32)offsetof(CellAdecAuInfo, size));
++    /* The AU info, read before AUDONE gives it back to the title. */
++    const u32 au_w[4] = { vm_read32(au + 0x08), vm_read32(au + 0x0C),
++                          vm_read32(au + 0x10), vm_read32(au + 0x14) };
++
++    printf("[cellAdec] DecodeAu(handle=%u, addr=0x%X, size=%u)\n",
++           handle, au_addr, au_size);
++
++    /* The AC3 bytes are copied out first, too: AUDONE hands their buffer back
++     * to the title's demuxer, which may refill it at once. */
++    const u8* data = NULL;
++    if (a->codecType == CELL_ADEC_TYPE_AC3 && au_addr && au_size && au_size <= 0x10000u) {
++        if (au_size > a->auCap) {
++            u8* nb = (u8*)realloc(a->au, au_size);
++            if (nb) { a->au = nb; a->auCap = au_size; }
++        }
++        if (au_size <= a->auCap) {
++            vm_memcpy_from(a->au, au_addr, au_size);
++            data = a->au;
++        }
++    }
++
++    /* Step 1: report the AU consumed. msgData is the AU INFO ADDRESS, not a
++     * status -- see RPCS3 Modules/cellAdec.cpp:1345. A decoder that tracks its
++     * outstanding AUs by address gets a null back if this is CELL_OK. */
++    adec_notify(handle, CELL_ADEC_MSG_TYPE_AUDONE, (s32)au);
++
++    /* Step 2: the PCM. AC3 through libavcodec when it is there; otherwise
++     * silence of the codec's frame size (AC3: 1536 samples in the frame's
++     * channels), so a title that counts PCM against time still runs. */
++    a->auCount++;
++    {
++        const u32 it = a->itemEa;
++        u32 ch = 0;
++        u32 bytes = (a->ff && data) ? adec_ff_decode(a->ff, data, au_size, a->pcmEa, &ch) : 0;
++        if (bytes == 0) {
++            if (a->codecType == CELL_ADEC_TYPE_AC3) {
++                ch = adec_ac3_channels(data, data ? au_size : 0);
++                bytes = ADEC_AC3_SAMPLES * (ch ? ch : 2u) * 4u;
++            } else {
++                bytes = ADEC_PCM_BYTES;
++            }
++            vm_memset(a->pcmEa, 0, bytes);
++        }
++        a->pcmBytes = bytes;
++
++        vm_write32(it + PCMITEM_PCM_HANDLE, (u32)handle);
++        vm_write32(it + PCMITEM_STATUS,     0);              /* CELL_OK */
++        vm_write32(it + PCMITEM_START_ADDR, a->pcmEa);
++        vm_write32(it + PCMITEM_SIZE,       bytes);
++        /* bsiInfo must point at a codec info block, not be null. Resistance:
++         * Fall of Man sizes each AC3 block from bsiInfo+0x14; with a null
++         * pointer that read address 0x14 and came back 0, so its ring buffer
++         * never filled, it never started its audio port, and its movie player
++         * waited forever. Other titles' PCMOUT handlers take the AU's
++         * PCM size from the same word. ponytail: only that output-size word is
++         * filled; the rest of the block is zero until a title reads another
++         * field. */
++        const u32 bsi = ADEC_BSI_EA(handle);
++        for (u32 o = 0; o < ADEC_BSI_BYTES; o += 4) vm_write32(bsi + o, 0);
++        vm_write32(bsi + 0x14, bytes);
++        vm_write32(it + PCMITEM_BSI_INFO,   bsi);
++        /* Echo the AU back, which is what a real decoder does -- the guest
++         * matches returned PCM against the AU it submitted. */
++        vm_write32(it + PCMITEM_AU_START,        au_addr);
++        vm_write32(it + PCMITEM_AU_SIZE,         au_size);
++        vm_write32(it + PCMITEM_AU_PTS_HI,       au_w[0]);
++        vm_write32(it + PCMITEM_AU_PTS_LO,       au_w[1]);
++        vm_write32(it + PCMITEM_AU_USERDATA,     au_w[2]);
++        vm_write32(it + PCMITEM_AU_USERDATA + 4, au_w[3]);
++    }
++    a->hasPcm = 1;
++
++    adec_notify(handle, CELL_ADEC_MSG_TYPE_PCMOUT, CELL_OK);
++
++    return CELL_OK;
++}
++
++s32 cellAdecGetPcm(CellAdecHandle handle, void* outBuffer)
++{
++    { static int _n = 0; if (PS3_LOG_FIRST(_n, 6))
++        printf("[cellAdec] GetPcm(handle=%u out=0x%08X)\n",
++               handle, GUEST_EA(outBuffer)); }
++    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
++        return (s32)CELL_ADEC_ERROR_ARG;
++
++    if (!s_adec[handle].hasPcm)
++        return (s32)CELL_ADEC_ERROR_EMPTY;
++
++    /* outBuffer is the GUEST's buffer: the AU's PCM block goes there, the
++     * size the item and bsiInfo+0x14 announced. Leaving it untouched hands the
++     * title whatever happened to be there, which it then plays. */
++    { const u32 out = GUEST_EA(outBuffer);
++      const AdecSlot* a = &s_adec[handle];
++      if (out && a->pcmBytes)
++          vm_memcpy_to(out, vm_ptr8(a->pcmEa), a->pcmBytes); }
++
++    s_adec[handle].hasPcm = 0;
++    return CELL_OK;
++}
++
++s32 cellAdecGetPcmItem(CellAdecHandle handle, const CellAdecPcmItem** pcmItem)
++{
++    { static int _n = 0; if (PS3_LOG_FIRST(_n, 6))
++        printf("[cellAdec] GetPcmItem(handle=%u out=0x%08X hasPcm=%d)\n",
++               handle, GUEST_EA(pcmItem),
++               handle < MAX_ADEC ? s_adec[handle].hasPcm : -1); }
++    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
++        return (s32)CELL_ADEC_ERROR_ARG;
++
++    if (!s_adec[handle].hasPcm)
++        return (s32)CELL_ADEC_ERROR_EMPTY;
++
++    /* pcmItem is a GUEST CellAdecPcmItem**. Writing &host_struct here put a
++     * HOST address into guest memory; the guest dereferenced it and died on a
++     * wild address (rip 0x870D0E, fault 0xCFFDFFF0). Write the guest EA. */
++    if (pcmItem)
++        vm_write32(GUEST_EA(pcmItem), s_adec[handle].itemEa);
++
++    return CELL_OK;
++}
 diff --git a/libs/codec/cellVdec.c b/libs/codec/cellVdec.c
-index 7e222c92..5577c8c3 100644
+index 7e222c92..af208fb3 100644
 --- a/libs/codec/cellVdec.c
 +++ b/libs/codec/cellVdec.c
 @@ -83,6 +83,7 @@ typedef struct {
@@ -23,7 +1121,90 @@ index 7e222c92..5577c8c3 100644
  
  /* The handle the guest sees is the slot index plus one, never 0: some
   * titles treat a 0 handle as "no decoder open".
-@@ -287,6 +288,7 @@ s32 cellVdecOpen(const CellVdecType* type, const CellVdecResource* res,
+@@ -108,6 +109,73 @@ static void vdec_notify(u32 slot, u32 msg_type, s32 msg_data)
+                        (u64)(s64)msg_data, (u64)v->cbArg, 0, 0, 0, 0);
+ }
+ 
++
++/* ---------------------------------------------------------------------------
++ * Asynchronous callbacks (local patch #72). On the console the decoder reports AUDONE / PICOUT /
++ * SEQDONE from its own thread, some time AFTER the call that caused them returned. Delivered
++ * synchronously inside cellVdecDecodeAu, MotorStorm: Apocalypse's movie player stalled for good
++ * after ~27 access units on a fast host (a slower DecodeAu, VDEC_AU_DELAY_MS=10, made it pass:
++ * the player is not ready for a callback that comes before DecodeAu returns). VDEC_CB_ASYNC=0 =
++ * synchronous as before.
++ * -----------------------------------------------------------------------*/
++#ifdef _WIN32
++typedef struct { u32 slot, gen, type; s32 data; } VdecEv;
++#define VDEC_EVQ 512
++static VdecEv s_evq[VDEC_EVQ];
++static unsigned s_ev_head, s_ev_cnt;
++static SRWLOCK s_ev_lock = SRWLOCK_INIT;
++static HANDLE s_ev_sem;
++static volatile LONG s_cb_async = -1;       /* -1 not decided, 0 synchronous, 1 helper thread */
++
++static DWORD WINAPI vdec_cb_thread(LPVOID a)
++{
++    (void)a;
++    for (;;) {
++        WaitForSingleObject(s_ev_sem, INFINITE);
++        AcquireSRWLockExclusive(&s_ev_lock);
++        if (!s_ev_cnt) { ReleaseSRWLockExclusive(&s_ev_lock); continue; }
++        VdecEv e = s_evq[s_ev_head];
++        s_ev_head = (s_ev_head + 1) % VDEC_EVQ;
++        s_ev_cnt--;
++        ReleaseSRWLockExclusive(&s_ev_lock);
++        const int live = e.slot < MAX_VDEC && s_vdec[e.slot].in_use && s_vdec_gen[e.slot] == e.gen;
++        if (live) vdec_notify(e.slot, e.type, e.data);
++    }
++}
++
++static void vdec_cb_init(void)
++{
++    if (s_cb_async >= 0) return;
++    AcquireSRWLockExclusive(&s_ev_lock);
++    if (s_cb_async < 0) {
++        const char* e = getenv("VDEC_CB_ASYNC");
++        LONG on = !(e && e[0] == '0');
++        if (on) {
++            s_ev_sem = CreateSemaphoreA(NULL, 0, VDEC_EVQ, NULL);
++            HANDLE t = s_ev_sem ? CreateThread(NULL, 0, vdec_cb_thread, NULL, 0, NULL) : NULL;
++            if (t) CloseHandle(t); else on = 0;
++        }
++        s_cb_async = on;
++    }
++    ReleaseSRWLockExclusive(&s_ev_lock);
++}
++
++static void vdec_post(u32 slot, u32 msg_type, s32 msg_data)
++{
++    vdec_cb_init();
++    if (!s_cb_async || slot >= MAX_VDEC) { vdec_notify(slot, msg_type, msg_data); return; }
++    AcquireSRWLockExclusive(&s_ev_lock);
++    if (s_ev_cnt >= VDEC_EVQ) { ReleaseSRWLockExclusive(&s_ev_lock); vdec_notify(slot, msg_type, msg_data); return; }
++    VdecEv* e = &s_evq[(s_ev_head + s_ev_cnt) % VDEC_EVQ];
++    e->slot = slot; e->gen = s_vdec_gen[slot]; e->type = msg_type; e->data = msg_data;
++    s_ev_cnt++;
++    ReleaseSRWLockExclusive(&s_ev_lock);
++    ReleaseSemaphore(s_ev_sem, 1, NULL);
++}
++#else
++static void vdec_post(u32 slot, u32 msg_type, s32 msg_data) { vdec_notify(slot, msg_type, msg_data); }
++#endif
++
+ /* ---------------------------------------------------------------------------
+  * Decoder path (libavcodec present)
+  * -----------------------------------------------------------------------*/
+@@ -170,7 +238,7 @@ static void vdec_notify_new_pics(u32 slot)
+     s_vdec[slot].newPics = 0;
+     VDEC_UNLOCK();
+     while (n--)
+-        vdec_notify(slot, CELL_VDEC_MSG_TYPE_PICOUT, CELL_OK);
++        vdec_post(slot, CELL_VDEC_MSG_TYPE_PICOUT, CELL_OK);
+ }
+ 
+ /* Idle drain. libavcodec holds back the pictures a B-frame stream may still
+@@ -287,6 +355,7 @@ s32 cellVdecOpen(const CellVdecType* type, const CellVdecResource* res,
          if (!s_vdec[i].in_use) {
              VDEC_LOCK();
              memset(&s_vdec[i], 0, sizeof(VdecSlot));
@@ -31,7 +1212,7 @@ index 7e222c92..5577c8c3 100644
              s_vdec[i].in_use = 1;
              s_vdec[i].codecType = codec_type;
              s_vdec[i].cbFunc = cb_ea ? vm_read32(cb_ea + 0) : 0;
-@@ -336,6 +338,7 @@ s32 cellVdecClose(CellVdecHandle handle)
+@@ -336,6 +405,7 @@ s32 cellVdecClose(CellVdecHandle handle)
          s_vdec[handle].ff = NULL;
      }
      s_vdec[handle].in_use = 0;
@@ -39,7 +1220,7 @@ index 7e222c92..5577c8c3 100644
      VDEC_UNLOCK();
      return CELL_OK;
  }
-@@ -364,6 +367,49 @@ s32 cellVdecStartSeq(CellVdecHandle handle)
+@@ -364,6 +434,49 @@ s32 cellVdecStartSeq(CellVdecHandle handle)
      return CELL_OK;
  }
  
@@ -89,7 +1270,7 @@ index 7e222c92..5577c8c3 100644
  s32 cellVdecEndSeq(CellVdecHandle handle)
  {
      printf("[cellVdec] EndSeq(handle=%u)\n", handle);
-@@ -383,8 +429,31 @@ s32 cellVdecEndSeq(CellVdecHandle handle)
+@@ -383,8 +496,31 @@ s32 cellVdecEndSeq(CellVdecHandle handle)
      if (ff)
          vdec_notify_new_pics(handle);
  
@@ -117,12 +1298,61 @@ index 7e222c92..5577c8c3 100644
 +        if (s_hold < 0) { const char* e = getenv("VDEC_ENDSEQ_HOLD_MS"); s_hold = e ? atoi(e) : 0; if (s_hold < 0) s_hold = 0; }
 +        if (s_async > 0 && vdec_seqdone_later(handle, (unsigned)s_async))
 +            return CELL_OK;
-+        vdec_notify(handle, CELL_VDEC_MSG_TYPE_SEQDONE, CELL_OK);
++        vdec_post(handle, CELL_VDEC_MSG_TYPE_SEQDONE, CELL_OK);
 +        if (s_hold > 0) vdec_sleep_ms((unsigned)s_hold);
 +    }
  
      return CELL_OK;
  }
+@@ -401,6 +537,11 @@ s32 cellVdecDecodeAu(CellVdecHandle handle, s32 mode, const CellVdecAuInfo* auIn
+ 
+     VdecSlot* v = &s_vdec[handle];
+ 
++    /* VDEC_AU_DELAY_MS=<n> (diagnostic, 2026-11-27): every DecodeAu takes n ms more. */
++    { static int s_dly = -1;
++      if (s_dly < 0) { const char* e = getenv("VDEC_AU_DELAY_MS"); s_dly = e ? atoi(e) : 0; }
++      if (s_dly > 0) vdec_sleep_ms((unsigned)s_dly); }
++
+     /* CellVdecAuInfo mixes u32 and u64, so it comes across field by field: a
+      * big-endian u64 is high word first, and a word-at-a-time copy would put
+      * the two halves the wrong way round on a little-endian host. */
+@@ -437,13 +578,13 @@ s32 cellVdecDecodeAu(CellVdecHandle handle, s32 mode, const CellVdecAuInfo* auIn
+         v->lastAuMs = vdec_now_ms();
+         v->idleDrained = 0;
+         VDEC_UNLOCK();
+-        vdec_notify(handle, CELL_VDEC_MSG_TYPE_AUDONE, CELL_OK);
++        vdec_post(handle, CELL_VDEC_MSG_TYPE_AUDONE, CELL_OK);
+         vdec_notify_new_pics(handle);
+         return CELL_OK;
+     }
+ 
+     /* Step 1: Report AU consumed */
+-    vdec_notify(handle, CELL_VDEC_MSG_TYPE_AUDONE, CELL_OK);
++    vdec_post(handle, CELL_VDEC_MSG_TYPE_AUDONE, CELL_OK);
+ 
+     /* Step 2: Generate a dummy PICOUT callback.
+      * Without FFmpeg, we can't actually decode video. But games expect the
+@@ -465,7 +606,7 @@ s32 cellVdecDecodeAu(CellVdecHandle handle, s32 mode, const CellVdecAuInfo* auIn
+     v->lastPic.height    = v->height ? v->height : 720;
+     v->hasPic = 1;
+ 
+-    vdec_notify(handle, CELL_VDEC_MSG_TYPE_PICOUT, CELL_OK);
++    vdec_post(handle, CELL_VDEC_MSG_TYPE_PICOUT, CELL_OK);
+ 
+     return CELL_OK;
+ }
+diff --git a/libs/codec/vdec_ffmpeg.c b/libs/codec/vdec_ffmpeg.c
+index 5bea1a96..c02de290 100644
+--- a/libs/codec/vdec_ffmpeg.c
++++ b/libs/codec/vdec_ffmpeg.c
+@@ -97,6 +97,7 @@ VdecFf* vdec_ff_open(u32 codec_type)
+     enum AVCodecID id;
+     if (codec_type == CELL_VDEC_CODEC_TYPE_AVC)        id = AV_CODEC_ID_H264;
+     else if (codec_type == CELL_VDEC_CODEC_TYPE_MPEG2) id = AV_CODEC_ID_MPEG2VIDEO;
++    else if (codec_type == CELL_VDEC_CODEC_TYPE_DIVX)  id = AV_CODEC_ID_MPEG4;   /* local patch #72: DivX / XviD = MPEG-4 ASP */
+     else return NULL;
+ 
+     const PS3FFmpeg* ff = ps3_ffmpeg_get();
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
 index 5f8a2fa2..d1b4c1aa 100644
 --- a/libs/input/cellPad.c
@@ -1114,7 +2344,7 @@ index 246ca166..ce2dfd0e 100644
  
  /* ---------------------------------------------------------------------------
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 854739e7..18d7856e 100644
+index 854739e7..17540ad2 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
 @@ -19,6 +19,7 @@
@@ -5462,7 +6692,7 @@ index 854739e7..18d7856e 100644
                  if (crt >= 0) {
                      dr->tex_rt[_u] = crt;
                      dr->tex_ds[_u] = ds;
-@@ -4931,12 +8112,18 @@ static void render_frame(void)
+@@ -4931,16 +8112,24 @@ static void render_frame(void)
                      continue;
                  }
              }
@@ -5479,12 +6709,20 @@ index 854739e7..18d7856e 100644
 -                if (en) {
 +                if (dxt_too < 0) { const char* e = getenv("SCREEN_AS_TEX_DXT"); dxt_too = (e && e[0] == '1') ? 1 : 0; }
 +                const u32 bf = dr->tex[_u].fmt & 0x9Fu;
-+                const int is_dxt = (bf >= 0x86u && bf <= 0x88u);
++                /* Also not for 8-bit formats (B8 0x81, G8B8 0x8B): the planes of a decoded video
++                 * (MotorStorm's movies: 1280x720 B8 luma) are display-sized too (patch #72). */
++                const int is_dxt = (bf >= 0x86u && bf <= 0x88u) || bf == 0x81u || bf == 0x8Bu;
 +                if (en && !(is_dxt && !dxt_too)) {
                      { static int _n = 0; if (PS3_LOG_FIRST(_n, 3))
                          fprintf(stderr, "[SCREENTEX] bound frame copy at unit %d for"
-                                         " fp=0x%X (%ux%u)%c", _u, dr->fp_addr,
-@@ -4969,11 +8156,26 @@ static void render_frame(void)
+-                                        " fp=0x%X (%ux%u)%c", _u, dr->fp_addr,
+-                                dr->tex[_u].w, dr->tex[_u].h, 10); }
++                                        " fp=0x%X (%ux%u fmt 0x%02X)%c", _u, dr->fp_addr,
++                                dr->tex[_u].w, dr->tex[_u].h, dr->tex[_u].fmt, 10); }
+                     srv_write(wslot, s_screen_copy, DXGI_FORMAT_R8G8B8A8_UNORM,
+                               D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+                     continue;
+@@ -4969,11 +8158,26 @@ static void render_frame(void)
                  }
              }
              if (dr->tex[_u].set) {
@@ -5514,7 +6752,7 @@ index 854739e7..18d7856e 100644
                      continue;
                  }
                  u32 _bf = dr->tex[_u].fmt & 0x9F;
-@@ -4981,13 +8183,15 @@ static void render_frame(void)
+@@ -4981,13 +8185,15 @@ static void render_frame(void)
                   * that is not a render target found above is guest data too. */
                  if (dr->tex[_u].off &&
                      (_bf == 0x81 || _bf == 0x85 || _bf == 0x8B ||
@@ -5533,7 +6771,7 @@ index 854739e7..18d7856e 100644
                      if (perf_on()) { s_perf_tex += perf_now() - _tt; s_perf_ntex++;
                          s_perf_texbytes += (u64)dr->tex[_u].w * dr->tex[_u].h * 4u; }
                      /* Both forms of the offset are in hand here; the filters
-@@ -5001,7 +8205,7 @@ static void render_frame(void)
+@@ -5001,7 +8207,7 @@ static void render_frame(void)
                          srv_write_ex(wslot, s_d3d.vp_tex[ts].res, sf,
                                    (_bf == 0x81) ? 0x1000
                                                  : rsx_remap_to_d3d(dr->tex[_u].ctrl1, _bf),
@@ -5542,7 +6780,7 @@ index 854739e7..18d7856e 100644
                          continue;
                      }
                  }
-@@ -5018,16 +8222,116 @@ static void render_frame(void)
+@@ -5018,16 +8224,116 @@ static void render_frame(void)
              srv_write(wslot, NULL, DXGI_FORMAT_R8G8B8A8_UNORM,
                        D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
          }
@@ -5662,7 +6900,7 @@ index 854739e7..18d7856e 100644
          if (perf_on()) s_perf_pso += perf_now() - _ps0;
      }
  
-@@ -5062,8 +8366,8 @@ static void render_frame(void)
+@@ -5062,8 +8368,8 @@ static void render_frame(void)
          1.0f, 0, 0, NULL);
  
      /* Set viewport and scissor */
@@ -5673,7 +6911,7 @@ index 854739e7..18d7856e 100644
      s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &viewport);
      s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &scissor);
  
-@@ -5142,9 +8446,9 @@ static void render_frame(void)
+@@ -5142,9 +8448,9 @@ static void render_frame(void)
           * must match the topology or D3D12 rejects the draw. */
          u32 last_topo = 0xFFFFFFFFu;
          ID3D12PipelineState* last_pso = NULL;
@@ -5686,7 +6924,7 @@ index 854739e7..18d7856e 100644
              const D3D12DrawRecord* dr = &s_d3d.draws[d];
              if (dr->is_vp) continue; /* drawn by the VP pass below */
  
-@@ -5217,6 +8521,7 @@ static void render_frame(void)
+@@ -5217,6 +8523,7 @@ static void render_frame(void)
              vbv.SizeInBytes    = MAX_VERTICES * 256;
              vbv.StrideInBytes  = 256;   /* 16 float4 attrib slots */
              s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 1, &vbv);
@@ -5694,7 +6932,7 @@ index 854739e7..18d7856e 100644
              D3D12_GPU_DESCRIPTOR_HANDLE gh_base;
              s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &gh_base);
              int cur_rt = -1;                       /* target A: -1 = backbuffer */
-@@ -5228,13 +8533,51 @@ static void render_frame(void)
+@@ -5228,13 +8535,51 @@ static void render_frame(void)
              D3D12_CPU_DESCRIPTOR_HANDLE cur_dsv = dsv_handle;
              double _rec0 = perf_on() ? perf_now() : 0.0;
              int seen_small_vp = 0, captured = 0;
@@ -5747,7 +6985,7 @@ index 854739e7..18d7856e 100644
                      ds_convert(ds, dr->tex_rt[_u]);
                      s_d3d.cmd_list->lpVtbl->SetGraphicsRootSignature(s_d3d.cmd_list, s_d3d.vp_root_sig);
                      { ID3D12DescriptorHeap* hp2[] = { s_d3d.srv_heap, s_d3d.samp_heap };
-@@ -5262,14 +8605,16 @@ static void render_frame(void)
+@@ -5262,14 +8607,16 @@ static void render_frame(void)
                  /* Render-to-texture: retarget when this op's surfaces differ.
                   * A pass with a depth surface binds its OffDS; one without
                   * shares a single depth buffer, cleared per switch. */
@@ -5766,7 +7004,7 @@ index 854739e7..18d7856e 100644
                  /* The draw's own depth surface, or the shared buffer for a pass
                   * without one (and for display targets, as before). */
                  const int wantz = (dr->zeta_off && (want >= 0 || dr->no_color))
-@@ -5280,12 +8625,12 @@ static void render_frame(void)
+@@ -5280,12 +8627,12 @@ static void render_frame(void)
                      D3D12_CPU_DESCRIPTOR_HANDLE rh[4];
                      UINT nrt = 1;
                      rh[0] = rtv_handle;
@@ -5782,7 +7020,7 @@ index 854739e7..18d7856e 100644
                      }
                      for (int _m = 0; _m < 3 && wantm[_m] >= 0; _m++) {
                          off_rt_transition(wantm[_m], D3D12_RESOURCE_STATE_RENDER_TARGET);
-@@ -5296,8 +8641,8 @@ static void render_frame(void)
+@@ -5296,8 +8643,8 @@ static void render_frame(void)
                          off_ds_transition(wantz, D3D12_RESOURCE_STATE_DEPTH_WRITE);
                          cur_dsv = off_ds_dsv(wantz);
                          if (dr->no_color) {
@@ -5793,7 +7031,7 @@ index 854739e7..18d7856e 100644
                          }
                      }
                      D3D12_RECT sc = {0, 0, (LONG)vp.Width, (LONG)vp.Height};
-@@ -5365,6 +8710,196 @@ static void render_frame(void)
+@@ -5365,6 +8712,196 @@ static void render_frame(void)
                      cur_rt = want;
                      for (int _m = 0; _m < 3; _m++) cur_m[_m] = wantm[_m];
                  }
@@ -5990,7 +7228,7 @@ index 854739e7..18d7856e 100644
                  if (dr->is_clear) {
                      D3D12_CPU_DESCRIPTOR_HANDLE rh =
                          (cur_rt >= 0) ? off_rt_rtv(cur_rt) : rtv_handle;
-@@ -5382,23 +8917,40 @@ static void render_frame(void)
+@@ -5382,23 +8919,40 @@ static void render_frame(void)
                          D3D12_CLEAR_FLAGS zf = (D3D12_CLEAR_FLAGS)
                              (((dr->clear_mask & 0x1u) ? D3D12_CLEAR_FLAG_DEPTH : 0) |
                               ((dr->clear_mask & 0x2u) ? D3D12_CLEAR_FLAG_STENCIL : 0));
@@ -6035,7 +7273,7 @@ index 854739e7..18d7856e 100644
                          }
                      continue;
                  }
-@@ -5406,16 +8958,29 @@ static void render_frame(void)
+@@ -5406,16 +8960,29 @@ static void render_frame(void)
                   * back to the hardcoded atlas/colour PS pair. */
                  u32 unnorm_dim[16][3];
                  u32 unnorm_mask = dr_unnorm_units(dr, unnorm_dim);
@@ -6066,7 +7304,7 @@ index 854739e7..18d7856e 100644
                  s_d3d.cmd_list->lpVtbl->OMSetStencilRef(s_d3d.cmd_list, dr->stencil_ref & 0xFFu);
                  if (cur_z >= 0 && (dr->zs_key & (2u | (1u << 5)))) s_d3d.off_ds[cur_z].gen++;
                  /* Per-draw viewport: the guest rect when sane, else the
-@@ -5436,6 +9001,17 @@ static void render_frame(void)
+@@ -5436,6 +9003,17 @@ static void render_frame(void)
                          dvp.Width    = (float)dr->vp_w;
                          dvp.Height   = (float)dr->vp_h;
                      }
@@ -6084,7 +7322,7 @@ index 854739e7..18d7856e 100644
                      D3D12_RECT dsc = {(LONG)dvp.TopLeftX, (LONG)dvp.TopLeftY,
                                        (LONG)(dvp.TopLeftX + dvp.Width),
                                        (LONG)(dvp.TopLeftY + dvp.Height)};
-@@ -5447,14 +9023,27 @@ static void render_frame(void)
+@@ -5447,14 +9025,27 @@ static void render_frame(void)
                  /* Per-draw textures: bind this draw's t0-t3 SRV window.
                   * Any sampled offscreen RT transitions to PSR first (never
                   * one of the currently-bound colour targets). */
@@ -6113,7 +7351,7 @@ index 854739e7..18d7856e 100644
                  s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, gh);
                  if (s_d3d.samp_heap) {
                      D3D12_GPU_DESCRIPTOR_HANDLE sb;
-@@ -5475,7 +9064,7 @@ static void render_frame(void)
+@@ -5475,7 +9066,7 @@ static void render_frame(void)
                  if (s_d3d.vp_fpcb)
                      s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 2,
                          s_d3d.vp_fpcb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_fpcb)
@@ -6122,7 +7360,7 @@ index 854739e7..18d7856e 100644
                  /* DRAWARGS=<N>: the arguments actually handed to the GPU, plus
                   * the target they are aimed at. A zero vertex count, or a start
                   * vertex past the buffer, rasterises nothing while every other
-@@ -5511,21 +9100,60 @@ static void render_frame(void)
+@@ -5511,21 +9102,60 @@ static void render_frame(void)
                        s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(
                            s_d3d.cmd_list, bn, brh, FALSE, &cur_dsv);
                    } }
@@ -6191,7 +7429,7 @@ index 854739e7..18d7856e 100644
                  /* VP_SUBMIT=<N>: prove the VP pass actually reaches the GPU.
                   * "records exist" and "draws were submitted" are different
                   * claims, and every blank-output investigation conflates them. */
-@@ -5540,19 +9168,21 @@ static void render_frame(void)
+@@ -5540,19 +9170,21 @@ static void render_frame(void)
                              dr->vs_idx, dr->cb_slot, dr->vb_byte_offset / 256,
                              dr->cull, dr->blend, 10); } }
              }
@@ -6216,7 +7454,7 @@ index 854739e7..18d7856e 100644
      /* MEMPEEK=<hex addr>:<n>: n big-endian floats at a guest address each frame,
       * with a min/max so a buffer of constants is distinguishable from real data. */
      { const char* mp = env_str("MEMPEEK", &s_env_mempeek);
-@@ -5601,16 +9231,47 @@ static void render_frame(void)
+@@ -5601,16 +9233,47 @@ static void render_frame(void)
       * it silently produced nothing in exactly the configuration being used. */
      { static int fb = -1;
        if (fb < 0) { const char* e = getenv("FRAME_BUDGET"); fb = e ? atoi(e) : 0; }
@@ -6267,7 +7505,7 @@ index 854739e7..18d7856e 100644
          s_t_prev = now;
          if (++s_n % 20 == 0) {
              double fr = s_perf_frame > 0 ? s_perf_frame : 1;
-@@ -5627,10 +9288,15 @@ static void render_frame(void)
+@@ -5627,10 +9290,15 @@ static void render_frame(void)
                      s_perf_pso, 100.0 * s_perf_pso / fr,
                      s_perf_pso_calls, s_perf_pso_miss, s_perf_pso_hashbytes / 1024,
                      fr - s_perf_rf, 100.0 * (fr - s_perf_rf) / fr, 10);
@@ -6283,7 +7521,7 @@ index 854739e7..18d7856e 100644
          }
      }
      { static int dt = -1;
-@@ -5652,8 +9318,8 @@ static void render_frame(void)
+@@ -5652,8 +9320,8 @@ static void render_frame(void)
      s_d3d.vb_offset  = 0; /* reset for next frame */
      s_d3d.vp_vb_offset = 0;
      s_d3d.vp_ib_offset = 0;
@@ -6294,7 +7532,7 @@ index 854739e7..18d7856e 100644
      s_d3d.draw_count = 0;
      s_d3d.vp_parity ^= 1;  /* next frame's records go to the other half */
  
-@@ -5692,15 +9358,15 @@ static void render_frame(void)
+@@ -5692,15 +9360,15 @@ static void render_frame(void)
              OffRT* r = &s_d3d.off_rt[rt];
              u32 bpp = (r->dxgi == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 8 :
                        (r->dxgi == DXGI_FORMAT_R32G32B32A32_FLOAT) ? 16 : 4;
@@ -6314,7 +7552,7 @@ index 854739e7..18d7856e 100644
                  rd.MipLevels = 1; rd.SampleDesc.Count = 1;
                  rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
                  s_d3d.device->lpVtbl->CreateCommittedResource(
-@@ -5715,8 +9381,8 @@ static void render_frame(void)
+@@ -5715,8 +9383,8 @@ static void render_frame(void)
                  cdst.pResource = s_rtsave_buf;
                  cdst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
                  cdst.PlacedFootprint.Footprint.Format   = (DXGI_FORMAT)r->dxgi;
@@ -6325,7 +7563,7 @@ index 854739e7..18d7856e 100644
                  cdst.PlacedFootprint.Footprint.Depth    = 1;
                  cdst.PlacedFootprint.Footprint.RowPitch = pitch;
                  csrc.pResource = r->res;
-@@ -5724,7 +9390,7 @@ static void render_frame(void)
+@@ -5724,7 +9392,7 @@ static void render_frame(void)
                  s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &cdst, 0, 0, 0, &csrc, NULL);
                  off_rt_transition(rt, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                  s_rtsave_state = 1;
@@ -6334,7 +7572,7 @@ index 854739e7..18d7856e 100644
                  s_rtsave_pitch = pitch; s_rtsave_dxgi = r->dxgi;
                  fprintf(stderr, "[RTT_SAVERT] copy queued: rt=%d %ux%u pitch=%u\n",
                          rt, r->w, r->h, pitch);
-@@ -5765,6 +9431,7 @@ skip_dump_consider: ;
+@@ -5765,6 +9433,7 @@ skip_dump_consider: ;
          if (s_every > 1) s_d3d.dump_skip_left = s_every - 1;
          rdoc_request();
      }
@@ -6342,7 +7580,7 @@ index 854739e7..18d7856e 100644
      if (dumping) {
          /* RT -> COPY_SOURCE, copy into the readback buffer, then -> PRESENT. */
          barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-@@ -5776,8 +9443,8 @@ skip_dump_consider: ;
+@@ -5776,8 +9445,8 @@ skip_dump_consider: ;
          dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
          dst.PlacedFootprint.Offset = 0;
          dst.PlacedFootprint.Footprint.Format   = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -6353,7 +7591,7 @@ index 854739e7..18d7856e 100644
          dst.PlacedFootprint.Footprint.Depth    = 1;
          dst.PlacedFootprint.Footprint.RowPitch = s_d3d.readback_pitch;
          src.pResource = s_d3d.render_targets[fi];
-@@ -5803,6 +9470,16 @@ skip_dump_consider: ;
+@@ -5803,6 +9472,16 @@ skip_dump_consider: ;
      ID3D12CommandList* cmd_lists[] = {(ID3D12CommandList*)s_d3d.cmd_list};
      s_d3d.cmd_queue->lpVtbl->ExecuteCommandLists(s_d3d.cmd_queue, 1, cmd_lists);
  
@@ -6370,7 +7608,7 @@ index 854739e7..18d7856e 100644
      /* D3D12_IQ=1: drain the debug layer's message queue after submitting the
       * frame. The legacy (is_vp=0) DrawInstanced path silently produced ZERO
       * pixels in flOw's render injection while ClearRenderTargetView worked, and
-@@ -5952,6 +9629,48 @@ skip_dump_consider: ;
+@@ -5952,6 +9631,48 @@ skip_dump_consider: ;
              }
          }
        } }
@@ -6419,7 +7657,7 @@ index 854739e7..18d7856e 100644
  
      /* Present, on the vblank unless D3D12_VSYNC=0: that one is for measuring a
       * title past the display's rate. Skipped for an offscreen-only batch. */
-@@ -5965,6 +9684,7 @@ skip_dump_consider: ;
+@@ -5965,6 +9686,7 @@ skip_dump_consider: ;
      rdoc_frame_end();
  
      move_to_next_frame();
@@ -6427,7 +7665,7 @@ index 854739e7..18d7856e 100644
  
      s_d3d.frame_count++;
  
-@@ -5979,17 +9699,189 @@ skip_dump_consider: ;
+@@ -5979,17 +9701,189 @@ skip_dump_consider: ;
          if (tnow - s_tt0 >= 1000 && s_d3d.hwnd) {
              extern char g_rsx_title_base[128];
              char tb[256];
@@ -6620,7 +7858,7 @@ index 854739e7..18d7856e 100644
  /* ---------------------------------------------------------------------------
   * RSX backend callbacks
   * -----------------------------------------------------------------------*/
-@@ -6011,10 +9903,400 @@ static void d3d12_begin_frame(void* ud)
+@@ -6011,10 +9905,400 @@ static void d3d12_begin_frame(void* ud)
  {
      (void)ud;
  }
@@ -7024,7 +8262,7 @@ index 854739e7..18d7856e 100644
  }
  
  static u32 s_dbg_clears_since_present = 0;   /* CELLMARK_BLINKDBG */
-@@ -6057,7 +10339,7 @@ static void d3d12_present(void* ud, u32 buffer_id)
+@@ -6057,7 +10341,7 @@ static void d3d12_present(void* ud, u32 buffer_id)
          }
  
      if (s_d3d.initialized && flip_has_display)
@@ -7033,7 +8271,7 @@ index 854739e7..18d7856e 100644
  
      /* FPS tracking */
      ULONGLONG now = GetTickCount64();
-@@ -6105,11 +10387,14 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+@@ -6105,11 +10389,14 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
              dr->rt_off = rt; memcpy(dr->rt_mrt, mrt, sizeof(mrt));
              rec_zeta(dr);
              dr->rt_w = rt_w; dr->rt_h = rt_h;
@@ -7049,7 +8287,7 @@ index 854739e7..18d7856e 100644
          }
          return;
      }
-@@ -6186,12 +10471,12 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+@@ -6186,12 +10473,12 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
          if (blink_dbg())
              printf("[CLEAR] presenting %u accumulated draws at frame boundary\n",
                     s_d3d.draw_count);
@@ -7064,7 +8302,7 @@ index 854739e7..18d7856e 100644
      s_ix_run_valid = 0;
      s_d3d.draw_count   = 0;
      s_d3d.vb_offset    = 0;
-@@ -6435,9 +10720,124 @@ static void vs_arrays(const rsx_state* st, u32 prim, u32 count)
+@@ -6435,9 +10722,124 @@ static void vs_arrays(const rsx_state* st, u32 prim, u32 count)
      vs_attrs(st);
  }
  
@@ -7189,7 +8427,7 @@ index 854739e7..18d7856e 100644
      for (int i = 0; i < 16; i++) {
          rsx_fetch_attrib(state, i, vi, out16[i].v);
          if (i == 0) {
-@@ -6448,6 +10848,353 @@ static void read_vp_vertex(const rsx_state* state, u32 vi, VPSlot* out16)
+@@ -6448,6 +10850,353 @@ static void read_vp_vertex(const rsx_state* state, u32 vi, VPSlot* out16)
      }
  }
  
@@ -7543,7 +8781,7 @@ index 854739e7..18d7856e 100644
  /* Per-draw vertex cache for the paths that expand one guest vertex into
   * several output vertices: indexed lists (shared vertices), strips and fans
   * (each vertex in up to three triangles) and indexed quads. Fetching all 16
-@@ -6849,11 +11596,34 @@ static int ix_on(void)
+@@ -6849,11 +11598,34 @@ static int ix_on(void)
      return on;
  }
  
@@ -7579,7 +8817,7 @@ index 854739e7..18d7856e 100644
      const D3D12DrawRecord* pv = &s_d3d.draws[s_d3d.draw_count - 1];
      const rsx_state* st = s_d3d.current_rsx_state;
      return pv->indexed && s_d3d.merge_first_end == first &&
-@@ -6864,38 +11634,88 @@ static int ix_can_continue(u32 first)
+@@ -6864,38 +11636,88 @@ static int ix_can_continue(u32 first)
             s_d3d.vp_vb_offset == (s_ix_vbase + s_ix_nverts) * VP_VERT_STRIDE;
  }
  
@@ -7677,7 +8915,7 @@ index 854739e7..18d7856e 100644
              s_ix_run_valid = 0;
              if (++s_ix_gen == 0) { memset(s_ix_stamp, 0, (1u << 20) * sizeof(u32)); s_ix_gen = 1; }
              return 0;
-@@ -6903,16 +11723,56 @@ static u32 upload_tris_vp_ix(const rsx_state* state, u32 first, u32 count, int c
+@@ -6903,16 +11725,56 @@ static u32 upload_tris_vp_ix(const rsx_state* state, u32 first, u32 count, int c
          if (s_ix_stamp[ix] != s_ix_gen) {
              s_ix_stamp[ix] = s_ix_gen;
              s_ix_slot[ix] = n;
@@ -7739,7 +8977,7 @@ index 854739e7..18d7856e 100644
  }
  
  static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
-@@ -7135,27 +11995,54 @@ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
+@@ -7135,27 +11997,54 @@ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
   * two vertices, as in upload_strip_vp: guest culling is honoured now, and
   * without the swap every second triangle comes out back-facing (God of War
   * HD's fullscreen 4-index quads lost their lower-right half). */
@@ -7804,7 +9042,7 @@ index 854739e7..18d7856e 100644
      s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
      return o;
  }
-@@ -7191,8 +12078,146 @@ static u32 upload_quad_strip_vp_indexed(const rsx_state* state, u32 first, u32 c
+@@ -7191,8 +12080,146 @@ static u32 upload_quad_strip_vp_indexed(const rsx_state* state, u32 first, u32 c
      return o;
  }
  
@@ -7951,7 +9189,7 @@ index 854739e7..18d7856e 100644
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7237,7 +12262,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7237,7 +12264,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
                  dr->is_vp          = 1;
                  dr->fp_addr = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->shader_program : 0;
                  dr->fp_ctrl = rec_fp_ctrl();
@@ -7960,7 +9198,7 @@ index 854739e7..18d7856e 100644
          dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
              dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
                  dr->cmask = 0xF;
-@@ -7247,6 +12272,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7247,6 +12274,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
                                | ((_cm & 0x00000100) ? 2u : 0u)   /* G */
                                | ((_cm & 0x00000001) ? 4u : 0u)   /* B */
                                | ((_cm & 0x01000000) ? 8u : 0u);  /* A */
@@ -7968,7 +9206,7 @@ index 854739e7..18d7856e 100644
                  }
                  dr->alpha_ctl = 0;
                  if (s_d3d.current_rsx_state)
-@@ -7272,7 +12298,8 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7272,7 +12300,8 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
                  }
                  dr->tex_slot = -1;
                  dr->vs_idx = vp_get_vs(s_d3d.current_rsx_state);
@@ -7978,7 +9216,7 @@ index 854739e7..18d7856e 100644
                  dr->blend = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->blend_enable : 1;
                  dr->blend_key = rsx_blend_key(s_d3d.current_rsx_state, dr->blend);
                  if (getenv("BLENDDBG")) { static u32 seen[32]; static int ns=0;
-@@ -7282,7 +12309,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7282,7 +12311,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
                          fprintf(stderr, "[BLEND] enable=%d key=0x%X%c",
                                  dr->blend, dr->blend_key, 10); } }
                  dr->rt_off = current_rt_off(&dr->rt_w, &dr->rt_h, dr->rt_mrt); rec_zeta(dr);
@@ -7987,7 +9225,7 @@ index 854739e7..18d7856e 100644
                  if (s_d3d.current_rsx_state) {
                      dr->vp_x = s_d3d.current_rsx_state->viewport_x;
                      dr->vp_y = s_d3d.current_rsx_state->viewport_y;
-@@ -7369,7 +12396,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7369,7 +12398,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
              dr->is_vp          = 1;
              dr->fp_addr = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->shader_program : 0;
              dr->fp_ctrl = rec_fp_ctrl();
@@ -7996,7 +9234,7 @@ index 854739e7..18d7856e 100644
          dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
              dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
              dr->cmask = 0xF;
-@@ -7379,6 +12406,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7379,6 +12408,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
                            | ((_cm & 0x00000100) ? 2u : 0u)   /* G */
                            | ((_cm & 0x00000001) ? 4u : 0u)   /* B */
                            | ((_cm & 0x01000000) ? 8u : 0u);  /* A */
@@ -8004,7 +9242,7 @@ index 854739e7..18d7856e 100644
              }
              dr->alpha_ctl = 0;
              if (s_d3d.current_rsx_state)
-@@ -7404,11 +12432,12 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7404,11 +12434,12 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
              }
              dr->tex_slot = -1;
              dr->vs_idx = vp_get_vs(s_d3d.current_rsx_state);
@@ -8019,7 +9257,7 @@ index 854739e7..18d7856e 100644
              if (s_d3d.current_rsx_state) {
                  dr->vp_x = s_d3d.current_rsx_state->viewport_x;
                  dr->vp_y = s_d3d.current_rsx_state->viewport_y;
-@@ -7455,8 +12484,381 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7455,8 +12486,381 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
      }
  }
  
@@ -8401,7 +9639,7 @@ index 854739e7..18d7856e 100644
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7482,12 +12884,32 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7482,12 +12886,32 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
      u32 rec = s_d3d.vp_vb_offset;
      const long long vs_t0 = vs_begin_indexed(s_d3d.current_rsx_state, primitive, first, count);
      int ix_used = 0, ix_cont = 0;
@@ -8440,7 +9678,7 @@ index 854739e7..18d7856e 100644
      if (ix_used) { /* the indexed run took it */ }
      else if (primitive == RSX_PRIMITIVE_QUADS)        emitted = upload_quads_vp_indexed(s_d3d.current_rsx_state, first, count);
      else if (primitive == RSX_PRIMITIVE_TRIANGLES)    emitted = upload_tris_vp_indexed(s_d3d.current_rsx_state, first, count);
-@@ -7528,23 +12950,40 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7528,23 +12952,40 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
              return;
          }
      }
@@ -8484,7 +9722,7 @@ index 854739e7..18d7856e 100644
          dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
          dr->cmask = 0xF;
          if (s_d3d.current_rsx_state) {
-@@ -7553,6 +12992,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7553,6 +12994,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
                        | ((_cm & 0x00000100) ? 2u : 0u)   /* G */
                        | ((_cm & 0x00000001) ? 4u : 0u)   /* B */
                        | ((_cm & 0x01000000) ? 8u : 0u);  /* A */
@@ -8492,7 +9730,7 @@ index 854739e7..18d7856e 100644
          }
          dr->alpha_ctl = 0;
          if (s_d3d.current_rsx_state)
-@@ -7577,12 +13017,13 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7577,12 +13019,13 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
              dr->tex_rt[_u]  = -1;
          }
          dr->tex_slot = -1;
@@ -8509,7 +9747,7 @@ index 854739e7..18d7856e 100644
          if (s_d3d.current_rsx_state) {
              dr->vp_x = s_d3d.current_rsx_state->viewport_x;
              dr->vp_y = s_d3d.current_rsx_state->viewport_y;
-@@ -7592,8 +13033,9 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7592,8 +13035,9 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
          dr->cb_slot = s_d3d.draw_count;
                  vp_record_cb(s_d3d.draw_count, dr->vs_idx, dr);
          s_d3d.draw_count++;
@@ -8521,7 +9759,7 @@ index 854739e7..18d7856e 100644
          s_d3d.merge_first_end = first + count;
      }
  }
-@@ -7693,7 +13135,16 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+@@ -7693,7 +13137,16 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
            * decodes: X16 (God of War: Ascension's 256x256 font atlas -- without
            * it every glyph drew as a solid quad), Y16_X16, X32_FLOAT and
            * Y16_X16_FLOAT (its post-process intermediates). */
@@ -8539,7 +9777,7 @@ index 854739e7..18d7856e 100644
          /* TEX_RESOLVE_AUTO=1: resolve through the page tables (local-page map
           * then IO table) instead of trusting the format's location bits. A
           * texture the guest built in main memory but tagged local resolves to
-@@ -7740,12 +13191,27 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+@@ -7740,12 +13193,27 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
          s_d3d.cur_texs[unit].fmt = format;   /* full byte: LN(0x20)/UN(0x40) kept */
          s_d3d.cur_texs[unit].ctrl1 = tex->control1;
          s_d3d.cur_texs[unit].cube  = (tex->format & 4) ? 1 : 0;
@@ -8567,7 +9805,7 @@ index 854739e7..18d7856e 100644
          if (env_str("TEXFMTDBG", &s_env_texfmtdbg)) { static u32 seen[64]; static int ns=0;
              u32 k = (unit<<24) | (((tex->format>>8) & 0xFFu)<<16) | (width & 0xFFFFu);
              int f=0; for (int i=0;i<ns;i++) if (seen[i]==k) f=1;
-@@ -7754,6 +13220,16 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+@@ -7754,6 +13222,16 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
                          unit, (tex->format >> 8) & 0xFFu, width, height,
                          (tex->format>>16)&0xFFFFu, (tex->format&4)?1:0, offset, 10); } }
          s_d3d.cur_texs[unit].set = 1;
@@ -8584,7 +9822,7 @@ index 854739e7..18d7856e 100644
      }
      if (base_fmt == 0x81 /* B8 */) {
          s_d3d.tex_src_offset = cellGcmResolveLocated((tex->format & 3) == 1, offset);
-@@ -7860,6 +13336,7 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
+@@ -7860,6 +13338,7 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
      memset(&s_d3d, 0, sizeof(s_d3d));
      s_d3d.width = width;
      s_d3d.height = height;
@@ -8592,7 +9830,7 @@ index 854739e7..18d7856e 100644
      s_d3d.clear_color[0] = 0.0f;
      s_d3d.clear_color[1] = 0.0f;
      s_d3d.clear_color[2] = 0.1f;
-@@ -7884,7 +13361,7 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
+@@ -7884,7 +13363,7 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
          snprintf(g_rsx_title_base, sizeof(g_rsx_title_base), "%s",
                   title ? title : "ps3recomp");
      }
@@ -8601,7 +9839,7 @@ index 854739e7..18d7856e 100644
      if (!s_d3d.hwnd) {
          printf("[D3D12] ERROR: Window creation failed\n");
          return -1;
-@@ -7927,6 +13404,7 @@ void rsx_d3d12_backend_shutdown(void)
+@@ -7927,6 +13406,7 @@ void rsx_d3d12_backend_shutdown(void)
  {
      if (!s_d3d.initialized) return;
  
@@ -8609,7 +9847,7 @@ index 854739e7..18d7856e 100644
      wait_for_gpu();
  
      /* Release D3D12 resources */
-@@ -8060,11 +13538,15 @@ void rsx_d3d12_backend_present(void)
+@@ -8060,11 +13540,15 @@ void rsx_d3d12_backend_present(void)
            if (remap < 0) { const char* e = getenv("TEX_REMAP"); remap = e ? atoi(e) : 0; }
            if (remap) rsx_reset_upload_claims(); }
          s_present_this_frame = has_display;
@@ -8626,7 +9864,7 @@ index 854739e7..18d7856e 100644
  #else /* !_WIN32 */
  
  #include <ps3emu/ps3types.h>   /* u32 (header includes above are inside the _WIN32 guard) */
-@@ -8080,5 +13562,8 @@ int rsx_d3d12_backend_init(u32 w, u32 h, const char* t)
+@@ -8080,5 +13564,8 @@ int rsx_d3d12_backend_init(u32 w, u32 h, const char* t)
  void rsx_d3d12_backend_shutdown(void) {}
  int rsx_d3d12_backend_pump_messages(void) { return 0; }
  void rsx_d3d12_backend_present(void) {}
