@@ -1114,7 +1114,7 @@ index 246ca166..ce2dfd0e 100644
  
  /* ---------------------------------------------------------------------------
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 854739e7..1489d56a 100644
+index 854739e7..18d7856e 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
 @@ -19,6 +19,7 @@
@@ -5462,7 +5462,29 @@ index 854739e7..1489d56a 100644
                  if (crt >= 0) {
                      dr->tex_rt[_u] = crt;
                      dr->tex_ds[_u] = ds;
-@@ -4969,11 +8150,26 @@ static void render_frame(void)
+@@ -4931,12 +8112,18 @@ static void render_frame(void)
+                     continue;
+                 }
+             }
+-            /* Display-sized sampler source -> the rendered frame. */
++            /* Display-sized sampler source -> the rendered frame. Not for a DXT texture
++             * (local patch #71): a framebuffer copy is never compressed, and MotorStorm
++             * Apocalypse's 1280x720 DXT1 loading image (MS3_LoadingScreen_*.dds) was replaced
++             * by the previous screen. SCREEN_AS_TEX_DXT=1 = as before. */
+             if (dr->tex[_u].set && s_screen_copy &&
+                 dr->tex[_u].w == s_d3d.width && dr->tex[_u].h == s_d3d.height) {
+-                static int en = -1;
++                static int en = -1, dxt_too = -1;
+                 if (en < 0) { const char* e = getenv("SCREEN_AS_TEX"); en = e ? atoi(e) : 1; }
+-                if (en) {
++                if (dxt_too < 0) { const char* e = getenv("SCREEN_AS_TEX_DXT"); dxt_too = (e && e[0] == '1') ? 1 : 0; }
++                const u32 bf = dr->tex[_u].fmt & 0x9Fu;
++                const int is_dxt = (bf >= 0x86u && bf <= 0x88u);
++                if (en && !(is_dxt && !dxt_too)) {
+                     { static int _n = 0; if (PS3_LOG_FIRST(_n, 3))
+                         fprintf(stderr, "[SCREENTEX] bound frame copy at unit %d for"
+                                         " fp=0x%X (%ux%u)%c", _u, dr->fp_addr,
+@@ -4969,11 +8156,26 @@ static void render_frame(void)
                  }
              }
              if (dr->tex[_u].set) {
@@ -5492,7 +5514,7 @@ index 854739e7..1489d56a 100644
                      continue;
                  }
                  u32 _bf = dr->tex[_u].fmt & 0x9F;
-@@ -4981,13 +8177,15 @@ static void render_frame(void)
+@@ -4981,13 +8183,15 @@ static void render_frame(void)
                   * that is not a render target found above is guest data too. */
                  if (dr->tex[_u].off &&
                      (_bf == 0x81 || _bf == 0x85 || _bf == 0x8B ||
@@ -5511,7 +5533,7 @@ index 854739e7..1489d56a 100644
                      if (perf_on()) { s_perf_tex += perf_now() - _tt; s_perf_ntex++;
                          s_perf_texbytes += (u64)dr->tex[_u].w * dr->tex[_u].h * 4u; }
                      /* Both forms of the offset are in hand here; the filters
-@@ -5001,7 +8199,7 @@ static void render_frame(void)
+@@ -5001,7 +8205,7 @@ static void render_frame(void)
                          srv_write_ex(wslot, s_d3d.vp_tex[ts].res, sf,
                                    (_bf == 0x81) ? 0x1000
                                                  : rsx_remap_to_d3d(dr->tex[_u].ctrl1, _bf),
@@ -5520,7 +5542,7 @@ index 854739e7..1489d56a 100644
                          continue;
                      }
                  }
-@@ -5018,16 +8216,116 @@ static void render_frame(void)
+@@ -5018,16 +8222,116 @@ static void render_frame(void)
              srv_write(wslot, NULL, DXGI_FORMAT_R8G8B8A8_UNORM,
                        D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
          }
@@ -5640,7 +5662,7 @@ index 854739e7..1489d56a 100644
          if (perf_on()) s_perf_pso += perf_now() - _ps0;
      }
  
-@@ -5062,8 +8360,8 @@ static void render_frame(void)
+@@ -5062,8 +8366,8 @@ static void render_frame(void)
          1.0f, 0, 0, NULL);
  
      /* Set viewport and scissor */
@@ -5651,7 +5673,7 @@ index 854739e7..1489d56a 100644
      s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &viewport);
      s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &scissor);
  
-@@ -5142,9 +8440,9 @@ static void render_frame(void)
+@@ -5142,9 +8446,9 @@ static void render_frame(void)
           * must match the topology or D3D12 rejects the draw. */
          u32 last_topo = 0xFFFFFFFFu;
          ID3D12PipelineState* last_pso = NULL;
@@ -5664,7 +5686,7 @@ index 854739e7..1489d56a 100644
              const D3D12DrawRecord* dr = &s_d3d.draws[d];
              if (dr->is_vp) continue; /* drawn by the VP pass below */
  
-@@ -5217,6 +8515,7 @@ static void render_frame(void)
+@@ -5217,6 +8521,7 @@ static void render_frame(void)
              vbv.SizeInBytes    = MAX_VERTICES * 256;
              vbv.StrideInBytes  = 256;   /* 16 float4 attrib slots */
              s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 1, &vbv);
@@ -5672,7 +5694,7 @@ index 854739e7..1489d56a 100644
              D3D12_GPU_DESCRIPTOR_HANDLE gh_base;
              s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &gh_base);
              int cur_rt = -1;                       /* target A: -1 = backbuffer */
-@@ -5228,13 +8527,51 @@ static void render_frame(void)
+@@ -5228,13 +8533,51 @@ static void render_frame(void)
              D3D12_CPU_DESCRIPTOR_HANDLE cur_dsv = dsv_handle;
              double _rec0 = perf_on() ? perf_now() : 0.0;
              int seen_small_vp = 0, captured = 0;
@@ -5725,7 +5747,7 @@ index 854739e7..1489d56a 100644
                      ds_convert(ds, dr->tex_rt[_u]);
                      s_d3d.cmd_list->lpVtbl->SetGraphicsRootSignature(s_d3d.cmd_list, s_d3d.vp_root_sig);
                      { ID3D12DescriptorHeap* hp2[] = { s_d3d.srv_heap, s_d3d.samp_heap };
-@@ -5262,14 +8599,16 @@ static void render_frame(void)
+@@ -5262,14 +8605,16 @@ static void render_frame(void)
                  /* Render-to-texture: retarget when this op's surfaces differ.
                   * A pass with a depth surface binds its OffDS; one without
                   * shares a single depth buffer, cleared per switch. */
@@ -5744,7 +5766,7 @@ index 854739e7..1489d56a 100644
                  /* The draw's own depth surface, or the shared buffer for a pass
                   * without one (and for display targets, as before). */
                  const int wantz = (dr->zeta_off && (want >= 0 || dr->no_color))
-@@ -5280,12 +8619,12 @@ static void render_frame(void)
+@@ -5280,12 +8625,12 @@ static void render_frame(void)
                      D3D12_CPU_DESCRIPTOR_HANDLE rh[4];
                      UINT nrt = 1;
                      rh[0] = rtv_handle;
@@ -5760,7 +5782,7 @@ index 854739e7..1489d56a 100644
                      }
                      for (int _m = 0; _m < 3 && wantm[_m] >= 0; _m++) {
                          off_rt_transition(wantm[_m], D3D12_RESOURCE_STATE_RENDER_TARGET);
-@@ -5296,8 +8635,8 @@ static void render_frame(void)
+@@ -5296,8 +8641,8 @@ static void render_frame(void)
                          off_ds_transition(wantz, D3D12_RESOURCE_STATE_DEPTH_WRITE);
                          cur_dsv = off_ds_dsv(wantz);
                          if (dr->no_color) {
@@ -5771,7 +5793,7 @@ index 854739e7..1489d56a 100644
                          }
                      }
                      D3D12_RECT sc = {0, 0, (LONG)vp.Width, (LONG)vp.Height};
-@@ -5365,6 +8704,196 @@ static void render_frame(void)
+@@ -5365,6 +8710,196 @@ static void render_frame(void)
                      cur_rt = want;
                      for (int _m = 0; _m < 3; _m++) cur_m[_m] = wantm[_m];
                  }
@@ -5968,7 +5990,7 @@ index 854739e7..1489d56a 100644
                  if (dr->is_clear) {
                      D3D12_CPU_DESCRIPTOR_HANDLE rh =
                          (cur_rt >= 0) ? off_rt_rtv(cur_rt) : rtv_handle;
-@@ -5382,23 +8911,40 @@ static void render_frame(void)
+@@ -5382,23 +8917,40 @@ static void render_frame(void)
                          D3D12_CLEAR_FLAGS zf = (D3D12_CLEAR_FLAGS)
                              (((dr->clear_mask & 0x1u) ? D3D12_CLEAR_FLAG_DEPTH : 0) |
                               ((dr->clear_mask & 0x2u) ? D3D12_CLEAR_FLAG_STENCIL : 0));
@@ -6013,7 +6035,7 @@ index 854739e7..1489d56a 100644
                          }
                      continue;
                  }
-@@ -5406,16 +8952,29 @@ static void render_frame(void)
+@@ -5406,16 +8958,29 @@ static void render_frame(void)
                   * back to the hardcoded atlas/colour PS pair. */
                  u32 unnorm_dim[16][3];
                  u32 unnorm_mask = dr_unnorm_units(dr, unnorm_dim);
@@ -6044,7 +6066,7 @@ index 854739e7..1489d56a 100644
                  s_d3d.cmd_list->lpVtbl->OMSetStencilRef(s_d3d.cmd_list, dr->stencil_ref & 0xFFu);
                  if (cur_z >= 0 && (dr->zs_key & (2u | (1u << 5)))) s_d3d.off_ds[cur_z].gen++;
                  /* Per-draw viewport: the guest rect when sane, else the
-@@ -5436,6 +8995,17 @@ static void render_frame(void)
+@@ -5436,6 +9001,17 @@ static void render_frame(void)
                          dvp.Width    = (float)dr->vp_w;
                          dvp.Height   = (float)dr->vp_h;
                      }
@@ -6062,7 +6084,7 @@ index 854739e7..1489d56a 100644
                      D3D12_RECT dsc = {(LONG)dvp.TopLeftX, (LONG)dvp.TopLeftY,
                                        (LONG)(dvp.TopLeftX + dvp.Width),
                                        (LONG)(dvp.TopLeftY + dvp.Height)};
-@@ -5447,14 +9017,27 @@ static void render_frame(void)
+@@ -5447,14 +9023,27 @@ static void render_frame(void)
                  /* Per-draw textures: bind this draw's t0-t3 SRV window.
                   * Any sampled offscreen RT transitions to PSR first (never
                   * one of the currently-bound colour targets). */
@@ -6091,7 +6113,7 @@ index 854739e7..1489d56a 100644
                  s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, gh);
                  if (s_d3d.samp_heap) {
                      D3D12_GPU_DESCRIPTOR_HANDLE sb;
-@@ -5475,7 +9058,7 @@ static void render_frame(void)
+@@ -5475,7 +9064,7 @@ static void render_frame(void)
                  if (s_d3d.vp_fpcb)
                      s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 2,
                          s_d3d.vp_fpcb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_fpcb)
@@ -6100,7 +6122,7 @@ index 854739e7..1489d56a 100644
                  /* DRAWARGS=<N>: the arguments actually handed to the GPU, plus
                   * the target they are aimed at. A zero vertex count, or a start
                   * vertex past the buffer, rasterises nothing while every other
-@@ -5511,21 +9094,60 @@ static void render_frame(void)
+@@ -5511,21 +9100,60 @@ static void render_frame(void)
                        s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(
                            s_d3d.cmd_list, bn, brh, FALSE, &cur_dsv);
                    } }
@@ -6169,7 +6191,7 @@ index 854739e7..1489d56a 100644
                  /* VP_SUBMIT=<N>: prove the VP pass actually reaches the GPU.
                   * "records exist" and "draws were submitted" are different
                   * claims, and every blank-output investigation conflates them. */
-@@ -5540,19 +9162,21 @@ static void render_frame(void)
+@@ -5540,19 +9168,21 @@ static void render_frame(void)
                              dr->vs_idx, dr->cb_slot, dr->vb_byte_offset / 256,
                              dr->cull, dr->blend, 10); } }
              }
@@ -6194,7 +6216,7 @@ index 854739e7..1489d56a 100644
      /* MEMPEEK=<hex addr>:<n>: n big-endian floats at a guest address each frame,
       * with a min/max so a buffer of constants is distinguishable from real data. */
      { const char* mp = env_str("MEMPEEK", &s_env_mempeek);
-@@ -5601,16 +9225,47 @@ static void render_frame(void)
+@@ -5601,16 +9231,47 @@ static void render_frame(void)
       * it silently produced nothing in exactly the configuration being used. */
      { static int fb = -1;
        if (fb < 0) { const char* e = getenv("FRAME_BUDGET"); fb = e ? atoi(e) : 0; }
@@ -6245,7 +6267,7 @@ index 854739e7..1489d56a 100644
          s_t_prev = now;
          if (++s_n % 20 == 0) {
              double fr = s_perf_frame > 0 ? s_perf_frame : 1;
-@@ -5627,10 +9282,15 @@ static void render_frame(void)
+@@ -5627,10 +9288,15 @@ static void render_frame(void)
                      s_perf_pso, 100.0 * s_perf_pso / fr,
                      s_perf_pso_calls, s_perf_pso_miss, s_perf_pso_hashbytes / 1024,
                      fr - s_perf_rf, 100.0 * (fr - s_perf_rf) / fr, 10);
@@ -6261,7 +6283,7 @@ index 854739e7..1489d56a 100644
          }
      }
      { static int dt = -1;
-@@ -5652,8 +9312,8 @@ static void render_frame(void)
+@@ -5652,8 +9318,8 @@ static void render_frame(void)
      s_d3d.vb_offset  = 0; /* reset for next frame */
      s_d3d.vp_vb_offset = 0;
      s_d3d.vp_ib_offset = 0;
@@ -6272,7 +6294,7 @@ index 854739e7..1489d56a 100644
      s_d3d.draw_count = 0;
      s_d3d.vp_parity ^= 1;  /* next frame's records go to the other half */
  
-@@ -5692,15 +9352,15 @@ static void render_frame(void)
+@@ -5692,15 +9358,15 @@ static void render_frame(void)
              OffRT* r = &s_d3d.off_rt[rt];
              u32 bpp = (r->dxgi == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 8 :
                        (r->dxgi == DXGI_FORMAT_R32G32B32A32_FLOAT) ? 16 : 4;
@@ -6292,7 +6314,7 @@ index 854739e7..1489d56a 100644
                  rd.MipLevels = 1; rd.SampleDesc.Count = 1;
                  rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
                  s_d3d.device->lpVtbl->CreateCommittedResource(
-@@ -5715,8 +9375,8 @@ static void render_frame(void)
+@@ -5715,8 +9381,8 @@ static void render_frame(void)
                  cdst.pResource = s_rtsave_buf;
                  cdst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
                  cdst.PlacedFootprint.Footprint.Format   = (DXGI_FORMAT)r->dxgi;
@@ -6303,7 +6325,7 @@ index 854739e7..1489d56a 100644
                  cdst.PlacedFootprint.Footprint.Depth    = 1;
                  cdst.PlacedFootprint.Footprint.RowPitch = pitch;
                  csrc.pResource = r->res;
-@@ -5724,7 +9384,7 @@ static void render_frame(void)
+@@ -5724,7 +9390,7 @@ static void render_frame(void)
                  s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &cdst, 0, 0, 0, &csrc, NULL);
                  off_rt_transition(rt, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                  s_rtsave_state = 1;
@@ -6312,7 +6334,7 @@ index 854739e7..1489d56a 100644
                  s_rtsave_pitch = pitch; s_rtsave_dxgi = r->dxgi;
                  fprintf(stderr, "[RTT_SAVERT] copy queued: rt=%d %ux%u pitch=%u\n",
                          rt, r->w, r->h, pitch);
-@@ -5765,6 +9425,7 @@ skip_dump_consider: ;
+@@ -5765,6 +9431,7 @@ skip_dump_consider: ;
          if (s_every > 1) s_d3d.dump_skip_left = s_every - 1;
          rdoc_request();
      }
@@ -6320,7 +6342,7 @@ index 854739e7..1489d56a 100644
      if (dumping) {
          /* RT -> COPY_SOURCE, copy into the readback buffer, then -> PRESENT. */
          barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-@@ -5776,8 +9437,8 @@ skip_dump_consider: ;
+@@ -5776,8 +9443,8 @@ skip_dump_consider: ;
          dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
          dst.PlacedFootprint.Offset = 0;
          dst.PlacedFootprint.Footprint.Format   = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -6331,7 +6353,7 @@ index 854739e7..1489d56a 100644
          dst.PlacedFootprint.Footprint.Depth    = 1;
          dst.PlacedFootprint.Footprint.RowPitch = s_d3d.readback_pitch;
          src.pResource = s_d3d.render_targets[fi];
-@@ -5803,6 +9464,16 @@ skip_dump_consider: ;
+@@ -5803,6 +9470,16 @@ skip_dump_consider: ;
      ID3D12CommandList* cmd_lists[] = {(ID3D12CommandList*)s_d3d.cmd_list};
      s_d3d.cmd_queue->lpVtbl->ExecuteCommandLists(s_d3d.cmd_queue, 1, cmd_lists);
  
@@ -6348,7 +6370,7 @@ index 854739e7..1489d56a 100644
      /* D3D12_IQ=1: drain the debug layer's message queue after submitting the
       * frame. The legacy (is_vp=0) DrawInstanced path silently produced ZERO
       * pixels in flOw's render injection while ClearRenderTargetView worked, and
-@@ -5952,6 +9623,48 @@ skip_dump_consider: ;
+@@ -5952,6 +9629,48 @@ skip_dump_consider: ;
              }
          }
        } }
@@ -6397,7 +6419,7 @@ index 854739e7..1489d56a 100644
  
      /* Present, on the vblank unless D3D12_VSYNC=0: that one is for measuring a
       * title past the display's rate. Skipped for an offscreen-only batch. */
-@@ -5965,6 +9678,7 @@ skip_dump_consider: ;
+@@ -5965,6 +9684,7 @@ skip_dump_consider: ;
      rdoc_frame_end();
  
      move_to_next_frame();
@@ -6405,7 +6427,7 @@ index 854739e7..1489d56a 100644
  
      s_d3d.frame_count++;
  
-@@ -5979,17 +9693,189 @@ skip_dump_consider: ;
+@@ -5979,17 +9699,189 @@ skip_dump_consider: ;
          if (tnow - s_tt0 >= 1000 && s_d3d.hwnd) {
              extern char g_rsx_title_base[128];
              char tb[256];
@@ -6598,7 +6620,7 @@ index 854739e7..1489d56a 100644
  /* ---------------------------------------------------------------------------
   * RSX backend callbacks
   * -----------------------------------------------------------------------*/
-@@ -6011,10 +9897,400 @@ static void d3d12_begin_frame(void* ud)
+@@ -6011,10 +9903,400 @@ static void d3d12_begin_frame(void* ud)
  {
      (void)ud;
  }
@@ -7002,7 +7024,7 @@ index 854739e7..1489d56a 100644
  }
  
  static u32 s_dbg_clears_since_present = 0;   /* CELLMARK_BLINKDBG */
-@@ -6057,7 +10333,7 @@ static void d3d12_present(void* ud, u32 buffer_id)
+@@ -6057,7 +10339,7 @@ static void d3d12_present(void* ud, u32 buffer_id)
          }
  
      if (s_d3d.initialized && flip_has_display)
@@ -7011,7 +7033,7 @@ index 854739e7..1489d56a 100644
  
      /* FPS tracking */
      ULONGLONG now = GetTickCount64();
-@@ -6105,11 +10381,14 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+@@ -6105,11 +10387,14 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
              dr->rt_off = rt; memcpy(dr->rt_mrt, mrt, sizeof(mrt));
              rec_zeta(dr);
              dr->rt_w = rt_w; dr->rt_h = rt_h;
@@ -7027,7 +7049,7 @@ index 854739e7..1489d56a 100644
          }
          return;
      }
-@@ -6186,12 +10465,12 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+@@ -6186,12 +10471,12 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
          if (blink_dbg())
              printf("[CLEAR] presenting %u accumulated draws at frame boundary\n",
                     s_d3d.draw_count);
@@ -7042,7 +7064,7 @@ index 854739e7..1489d56a 100644
      s_ix_run_valid = 0;
      s_d3d.draw_count   = 0;
      s_d3d.vb_offset    = 0;
-@@ -6435,9 +10714,124 @@ static void vs_arrays(const rsx_state* st, u32 prim, u32 count)
+@@ -6435,9 +10720,124 @@ static void vs_arrays(const rsx_state* st, u32 prim, u32 count)
      vs_attrs(st);
  }
  
@@ -7167,7 +7189,7 @@ index 854739e7..1489d56a 100644
      for (int i = 0; i < 16; i++) {
          rsx_fetch_attrib(state, i, vi, out16[i].v);
          if (i == 0) {
-@@ -6448,6 +10842,353 @@ static void read_vp_vertex(const rsx_state* state, u32 vi, VPSlot* out16)
+@@ -6448,6 +10848,353 @@ static void read_vp_vertex(const rsx_state* state, u32 vi, VPSlot* out16)
      }
  }
  
@@ -7521,7 +7543,7 @@ index 854739e7..1489d56a 100644
  /* Per-draw vertex cache for the paths that expand one guest vertex into
   * several output vertices: indexed lists (shared vertices), strips and fans
   * (each vertex in up to three triangles) and indexed quads. Fetching all 16
-@@ -6849,11 +11590,34 @@ static int ix_on(void)
+@@ -6849,11 +11596,34 @@ static int ix_on(void)
      return on;
  }
  
@@ -7557,7 +7579,7 @@ index 854739e7..1489d56a 100644
      const D3D12DrawRecord* pv = &s_d3d.draws[s_d3d.draw_count - 1];
      const rsx_state* st = s_d3d.current_rsx_state;
      return pv->indexed && s_d3d.merge_first_end == first &&
-@@ -6864,38 +11628,88 @@ static int ix_can_continue(u32 first)
+@@ -6864,38 +11634,88 @@ static int ix_can_continue(u32 first)
             s_d3d.vp_vb_offset == (s_ix_vbase + s_ix_nverts) * VP_VERT_STRIDE;
  }
  
@@ -7655,7 +7677,7 @@ index 854739e7..1489d56a 100644
              s_ix_run_valid = 0;
              if (++s_ix_gen == 0) { memset(s_ix_stamp, 0, (1u << 20) * sizeof(u32)); s_ix_gen = 1; }
              return 0;
-@@ -6903,16 +11717,56 @@ static u32 upload_tris_vp_ix(const rsx_state* state, u32 first, u32 count, int c
+@@ -6903,16 +11723,56 @@ static u32 upload_tris_vp_ix(const rsx_state* state, u32 first, u32 count, int c
          if (s_ix_stamp[ix] != s_ix_gen) {
              s_ix_stamp[ix] = s_ix_gen;
              s_ix_slot[ix] = n;
@@ -7717,7 +7739,7 @@ index 854739e7..1489d56a 100644
  }
  
  static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
-@@ -7135,27 +11989,54 @@ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
+@@ -7135,27 +11995,54 @@ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
   * two vertices, as in upload_strip_vp: guest culling is honoured now, and
   * without the swap every second triangle comes out back-facing (God of War
   * HD's fullscreen 4-index quads lost their lower-right half). */
@@ -7782,7 +7804,7 @@ index 854739e7..1489d56a 100644
      s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
      return o;
  }
-@@ -7191,8 +12072,146 @@ static u32 upload_quad_strip_vp_indexed(const rsx_state* state, u32 first, u32 c
+@@ -7191,8 +12078,146 @@ static u32 upload_quad_strip_vp_indexed(const rsx_state* state, u32 first, u32 c
      return o;
  }
  
@@ -7929,7 +7951,7 @@ index 854739e7..1489d56a 100644
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7237,7 +12256,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7237,7 +12262,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
                  dr->is_vp          = 1;
                  dr->fp_addr = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->shader_program : 0;
                  dr->fp_ctrl = rec_fp_ctrl();
@@ -7938,7 +7960,7 @@ index 854739e7..1489d56a 100644
          dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
              dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
                  dr->cmask = 0xF;
-@@ -7247,6 +12266,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7247,6 +12272,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
                                | ((_cm & 0x00000100) ? 2u : 0u)   /* G */
                                | ((_cm & 0x00000001) ? 4u : 0u)   /* B */
                                | ((_cm & 0x01000000) ? 8u : 0u);  /* A */
@@ -7946,7 +7968,7 @@ index 854739e7..1489d56a 100644
                  }
                  dr->alpha_ctl = 0;
                  if (s_d3d.current_rsx_state)
-@@ -7272,7 +12292,8 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7272,7 +12298,8 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
                  }
                  dr->tex_slot = -1;
                  dr->vs_idx = vp_get_vs(s_d3d.current_rsx_state);
@@ -7956,7 +7978,7 @@ index 854739e7..1489d56a 100644
                  dr->blend = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->blend_enable : 1;
                  dr->blend_key = rsx_blend_key(s_d3d.current_rsx_state, dr->blend);
                  if (getenv("BLENDDBG")) { static u32 seen[32]; static int ns=0;
-@@ -7282,7 +12303,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7282,7 +12309,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
                          fprintf(stderr, "[BLEND] enable=%d key=0x%X%c",
                                  dr->blend, dr->blend_key, 10); } }
                  dr->rt_off = current_rt_off(&dr->rt_w, &dr->rt_h, dr->rt_mrt); rec_zeta(dr);
@@ -7965,7 +7987,7 @@ index 854739e7..1489d56a 100644
                  if (s_d3d.current_rsx_state) {
                      dr->vp_x = s_d3d.current_rsx_state->viewport_x;
                      dr->vp_y = s_d3d.current_rsx_state->viewport_y;
-@@ -7369,7 +12390,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7369,7 +12396,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
              dr->is_vp          = 1;
              dr->fp_addr = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->shader_program : 0;
              dr->fp_ctrl = rec_fp_ctrl();
@@ -7974,7 +7996,7 @@ index 854739e7..1489d56a 100644
          dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
              dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
              dr->cmask = 0xF;
-@@ -7379,6 +12400,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7379,6 +12406,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
                            | ((_cm & 0x00000100) ? 2u : 0u)   /* G */
                            | ((_cm & 0x00000001) ? 4u : 0u)   /* B */
                            | ((_cm & 0x01000000) ? 8u : 0u);  /* A */
@@ -7982,7 +8004,7 @@ index 854739e7..1489d56a 100644
              }
              dr->alpha_ctl = 0;
              if (s_d3d.current_rsx_state)
-@@ -7404,11 +12426,12 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7404,11 +12432,12 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
              }
              dr->tex_slot = -1;
              dr->vs_idx = vp_get_vs(s_d3d.current_rsx_state);
@@ -7997,7 +8019,7 @@ index 854739e7..1489d56a 100644
              if (s_d3d.current_rsx_state) {
                  dr->vp_x = s_d3d.current_rsx_state->viewport_x;
                  dr->vp_y = s_d3d.current_rsx_state->viewport_y;
-@@ -7455,8 +12478,381 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7455,8 +12484,381 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
      }
  }
  
@@ -8379,7 +8401,7 @@ index 854739e7..1489d56a 100644
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7482,12 +12878,32 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7482,12 +12884,32 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
      u32 rec = s_d3d.vp_vb_offset;
      const long long vs_t0 = vs_begin_indexed(s_d3d.current_rsx_state, primitive, first, count);
      int ix_used = 0, ix_cont = 0;
@@ -8418,7 +8440,7 @@ index 854739e7..1489d56a 100644
      if (ix_used) { /* the indexed run took it */ }
      else if (primitive == RSX_PRIMITIVE_QUADS)        emitted = upload_quads_vp_indexed(s_d3d.current_rsx_state, first, count);
      else if (primitive == RSX_PRIMITIVE_TRIANGLES)    emitted = upload_tris_vp_indexed(s_d3d.current_rsx_state, first, count);
-@@ -7528,23 +12944,40 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7528,23 +12950,40 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
              return;
          }
      }
@@ -8462,7 +8484,7 @@ index 854739e7..1489d56a 100644
          dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
          dr->cmask = 0xF;
          if (s_d3d.current_rsx_state) {
-@@ -7553,6 +12986,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7553,6 +12992,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
                        | ((_cm & 0x00000100) ? 2u : 0u)   /* G */
                        | ((_cm & 0x00000001) ? 4u : 0u)   /* B */
                        | ((_cm & 0x01000000) ? 8u : 0u);  /* A */
@@ -8470,7 +8492,7 @@ index 854739e7..1489d56a 100644
          }
          dr->alpha_ctl = 0;
          if (s_d3d.current_rsx_state)
-@@ -7577,12 +13011,13 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7577,12 +13017,13 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
              dr->tex_rt[_u]  = -1;
          }
          dr->tex_slot = -1;
@@ -8487,7 +8509,7 @@ index 854739e7..1489d56a 100644
          if (s_d3d.current_rsx_state) {
              dr->vp_x = s_d3d.current_rsx_state->viewport_x;
              dr->vp_y = s_d3d.current_rsx_state->viewport_y;
-@@ -7592,8 +13027,9 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7592,8 +13033,9 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
          dr->cb_slot = s_d3d.draw_count;
                  vp_record_cb(s_d3d.draw_count, dr->vs_idx, dr);
          s_d3d.draw_count++;
@@ -8499,7 +8521,7 @@ index 854739e7..1489d56a 100644
          s_d3d.merge_first_end = first + count;
      }
  }
-@@ -7693,7 +13129,16 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+@@ -7693,7 +13135,16 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
            * decodes: X16 (God of War: Ascension's 256x256 font atlas -- without
            * it every glyph drew as a solid quad), Y16_X16, X32_FLOAT and
            * Y16_X16_FLOAT (its post-process intermediates). */
@@ -8517,7 +8539,7 @@ index 854739e7..1489d56a 100644
          /* TEX_RESOLVE_AUTO=1: resolve through the page tables (local-page map
           * then IO table) instead of trusting the format's location bits. A
           * texture the guest built in main memory but tagged local resolves to
-@@ -7740,12 +13185,27 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+@@ -7740,12 +13191,27 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
          s_d3d.cur_texs[unit].fmt = format;   /* full byte: LN(0x20)/UN(0x40) kept */
          s_d3d.cur_texs[unit].ctrl1 = tex->control1;
          s_d3d.cur_texs[unit].cube  = (tex->format & 4) ? 1 : 0;
@@ -8545,7 +8567,7 @@ index 854739e7..1489d56a 100644
          if (env_str("TEXFMTDBG", &s_env_texfmtdbg)) { static u32 seen[64]; static int ns=0;
              u32 k = (unit<<24) | (((tex->format>>8) & 0xFFu)<<16) | (width & 0xFFFFu);
              int f=0; for (int i=0;i<ns;i++) if (seen[i]==k) f=1;
-@@ -7754,6 +13214,16 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+@@ -7754,6 +13220,16 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
                          unit, (tex->format >> 8) & 0xFFu, width, height,
                          (tex->format>>16)&0xFFFFu, (tex->format&4)?1:0, offset, 10); } }
          s_d3d.cur_texs[unit].set = 1;
@@ -8562,7 +8584,7 @@ index 854739e7..1489d56a 100644
      }
      if (base_fmt == 0x81 /* B8 */) {
          s_d3d.tex_src_offset = cellGcmResolveLocated((tex->format & 3) == 1, offset);
-@@ -7860,6 +13330,7 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
+@@ -7860,6 +13336,7 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
      memset(&s_d3d, 0, sizeof(s_d3d));
      s_d3d.width = width;
      s_d3d.height = height;
@@ -8570,7 +8592,7 @@ index 854739e7..1489d56a 100644
      s_d3d.clear_color[0] = 0.0f;
      s_d3d.clear_color[1] = 0.0f;
      s_d3d.clear_color[2] = 0.1f;
-@@ -7884,7 +13355,7 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
+@@ -7884,7 +13361,7 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
          snprintf(g_rsx_title_base, sizeof(g_rsx_title_base), "%s",
                   title ? title : "ps3recomp");
      }
@@ -8579,7 +8601,7 @@ index 854739e7..1489d56a 100644
      if (!s_d3d.hwnd) {
          printf("[D3D12] ERROR: Window creation failed\n");
          return -1;
-@@ -7927,6 +13398,7 @@ void rsx_d3d12_backend_shutdown(void)
+@@ -7927,6 +13404,7 @@ void rsx_d3d12_backend_shutdown(void)
  {
      if (!s_d3d.initialized) return;
  
@@ -8587,7 +8609,7 @@ index 854739e7..1489d56a 100644
      wait_for_gpu();
  
      /* Release D3D12 resources */
-@@ -8060,11 +13532,15 @@ void rsx_d3d12_backend_present(void)
+@@ -8060,11 +13538,15 @@ void rsx_d3d12_backend_present(void)
            if (remap < 0) { const char* e = getenv("TEX_REMAP"); remap = e ? atoi(e) : 0; }
            if (remap) rsx_reset_upload_claims(); }
          s_present_this_frame = has_display;
@@ -8604,7 +8626,7 @@ index 854739e7..1489d56a 100644
  #else /* !_WIN32 */
  
  #include <ps3emu/ps3types.h>   /* u32 (header includes above are inside the _WIN32 guard) */
-@@ -8080,5 +13556,8 @@ int rsx_d3d12_backend_init(u32 w, u32 h, const char* t)
+@@ -8080,5 +13562,8 @@ int rsx_d3d12_backend_init(u32 w, u32 h, const char* t)
  void rsx_d3d12_backend_shutdown(void) {}
  int rsx_d3d12_backend_pump_messages(void) { return 0; }
  void rsx_d3d12_backend_present(void) {}
@@ -10035,7 +10057,7 @@ index 4b7df8c5..924c1651 100644
 +
  #endif /* PS3_LOG_H */
 diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
-index 84b7ac96..9042bfc1 100644
+index 84b7ac96..ab3cd11f 100644
 --- a/runtime/spu/spu_channels.c
 +++ b/runtime/spu/spu_channels.c
 @@ -13,6 +13,9 @@
@@ -10321,7 +10343,15 @@ index 84b7ac96..9042bfc1 100644
      spu_honour_stop_request(ctx);
      /* SPU_WHOPOLLS=<n>: rchcnt/park accounting PER SPU, printed every n calls
       * with the pc each SPU is sitting at.
-@@ -2213,6 +2399,12 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
+@@ -1840,6 +2026,7 @@ static void spu_dcache_shadow_stats(void)
+ }
+ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
+ {
++    SPU_JS(4, 0);
+     const int mode = spu_dcache_mode();
+     if (!mode || !ctx) return spu_lifted_lookup_full(ctx, lsa, NULL);
+     spu_context* c = (spu_context*)ctx;
+@@ -2213,6 +2400,12 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
          uint32_t base = ctx->resident_code[slot].lsa;
          uint32_t end = base + ctx->resident_code[slot].size;
          if (lsa < end && lsa + size > base) {
@@ -10334,7 +10364,7 @@ index 84b7ac96..9042bfc1 100644
              if (lsa < base || ea != ctx->resident_code[slot].source_ea + (lsa - base)) {
                  ctx->resident_code[slot].image_id = 0;
                  spu_dcache_residency_changed(ctx);
-@@ -2684,6 +2876,48 @@ static int spu_smc_microstep(spu_context* ctx)
+@@ -2684,6 +2877,114 @@ static int spu_smc_microstep(spu_context* ctx)
      return 0;
  }
  
@@ -10346,10 +10376,76 @@ index 84b7ac96..9042bfc1 100644
 + * is closed by the next job entry on the same thread. */
 +static SPU_TLS struct { uint64_t t0; uint32_t img, ret, entry; const spu_context* ctx; } t_ftj;
 +
++/* SPU_JOBSTATS=1 (local patch #70): per WWS job module (image id, 0 = outside any job), what the
++ * lanes spend their calls on: jobs entered, DMA transfers and bytes, indirect branches (the
++ * resolver), spu_drain_call calls, lifted-function lookups. Cumulative table on stderr every
++ * SPU_JOBSTATS seconds (default 10), "[spu-js] t=<s> img=<n> jobs= dma= bytes= ib= drain= lookup=".
++ * Costs one load and one predictable branch per event when off. */
++int g_spu_js_on = -1;
++static volatile uint64_t s_js[256][6];   /* 0 jobs, 1 dma, 2 dma bytes, 3 ib, 4 drain, 5 lookup */
++static SPU_TLS struct { uint32_t img, ret; const spu_context* ctx; } t_js;
++static unsigned s_js_period = 10;
++static volatile uint64_t s_js_last;
++static void spu_js_dump(void)
++{
++    const uint64_t now = GetTickCount64();
++    fprintf(stderr, "[spu-js] t=%.1f\n", (double)now / 1000.0);
++    for (int i = 0; i < 256; i++) {
++        const uint64_t n = s_js[i][0] | s_js[i][1] | s_js[i][3] | s_js[i][4] | s_js[i][5];
++        if (!n) continue;
++        fprintf(stderr, "[spu-js] img=%d jobs=%llu dma=%llu bytes=%llu ib=%llu drain=%llu lookup=%llu\n", i,
++                (unsigned long long)s_js[i][0], (unsigned long long)s_js[i][1], (unsigned long long)s_js[i][2],
++                (unsigned long long)s_js[i][3], (unsigned long long)s_js[i][4], (unsigned long long)s_js[i][5]);
++    }
++    fflush(stderr);
++}
++void spu_js_note(int kind, uint32_t n)
++{
++    if (g_spu_js_on < 0) {
++        const char* e = getenv("SPU_JOBSTATS");
++        if (e && *e && atoi(e) != 0) { s_js_period = (unsigned)atoi(e); if (s_js_period > 3600) s_js_period = 10; if (s_js_period < 1) s_js_period = 10; }
++        s_js_last = GetTickCount64();
++        g_spu_js_on = (e && *e && atoi(e) != 0) ? 1 : 0;
++        if (!g_spu_js_on) return;
++    }
++    const uint32_t img = t_js.img & 255u;
++    switch (kind) {
++    case 1: __atomic_add_fetch(&s_js[img][1], 1, __ATOMIC_RELAXED);
++            __atomic_add_fetch(&s_js[img][2], n, __ATOMIC_RELAXED);
++            if ((s_js[img][1] & 0x3FF) == 0) {
++                const uint64_t now = GetTickCount64(), last = s_js_last;
++                if (now - last >= (uint64_t)s_js_period * 1000u &&
++                    __atomic_compare_exchange_n(&s_js_last, (uint64_t*)&last, now, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
++                    spu_js_dump();
++            }
++            break;
++    case 2: __atomic_add_fetch(&s_js[img][3], 1, __ATOMIC_RELAXED); break;
++    case 3: __atomic_add_fetch(&s_js[img][4], 1, __ATOMIC_RELAXED); break;
++    case 4: __atomic_add_fetch(&s_js[img][5], 1, __ATOMIC_RELAXED); break;
++    }
++}
++/* Same entry / return detection as spu_ft_job_hook, without the timeline. */
++static void spu_js_hook(spu_context* ctx)
++{
++    const uint32_t pc = ctx->pc;
++    if (t_js.img && t_js.ctx == ctx && pc == t_js.ret) { t_js.img = 0; return; }
++    if (pc < 0x4000) return;
++    const uint32_t lr = ctx->gpr[0]._u32[0] & SPU_LS_MASK;
++    if (lr >= 0x4000 || lr < 0xA00) return;
++    for (unsigned s = 0; s < 4; s++) {
++        if (ctx->resident_code[s].image_id < 200 || pc < ctx->resident_code[s].lsa ||
++            pc - ctx->resident_code[s].lsa >= ctx->resident_code[s].size) continue;
++        t_js.img = (uint32_t)ctx->resident_code[s].image_id; t_js.ret = lr; t_js.ctx = ctx;
++        __atomic_add_fetch(&s_js[t_js.img & 255u][0], 1, __ATOMIC_RELAXED);
++        return;
++    }
++}
++
 +/* The usual way back: the job's `bi $r0` is a host return into the drain of
 + * the manager's call (spu_drain_call), which never comes through the resolver. */
 +void spu_ft_job_return(spu_context* ctx, uint32_t return_pc)
 +{
++    if (t_js.img && t_js.ctx == ctx && (return_pc & SPU_LS_MASK) == t_js.ret) t_js.img = 0;
 +    if (!t_ftj.t0 || t_ftj.ctx != ctx || (return_pc & SPU_LS_MASK) != t_ftj.ret) return;
 +    ps3_ft_span(PS3_FT_SPU_JOB, (uint32_t)GetCurrentThreadId() & 0xFFFFu, t_ftj.img, t_ftj.entry,
 +                t_ftj.t0, ps3_ft_now());
@@ -10383,11 +10479,12 @@ index 84b7ac96..9042bfc1 100644
  void spu_indirect_branch(spu_context* ctx)
  {
      /* Real SPU bi/bisl mask the target to the 256 KB local store; the high bits
-@@ -2692,6 +2926,7 @@ void spu_indirect_branch(spu_context* ctx)
+@@ -2692,6 +2993,8 @@ void spu_indirect_branch(spu_context* ctx)
       * and falls into branch-to-0. All lifted funcs live below SPU_LS_SIZE, so
       * masking is a no-op for already-valid targets. */
      ctx->pc &= SPU_LS_MASK;
 +    if (PS3_FT_ON()) spu_ft_job_hook(ctx);
++    if (g_spu_js_on != 0) { SPU_JS(2, 0); if (g_spu_js_on > 0) spu_js_hook(ctx); }
      /* Interrupt-return register restore (see spu_drain.c spu_irq_regs_save):
       * the WWS handler's save/restore shim lives at unlifted top-of-LS, so we
       * enforce the preserve-all-registers hardware contract here -- the first
@@ -10810,7 +10907,7 @@ index ea2e8351..79856893 100644
 +
 +#endif /* SPU_COHERENCY_H */
 diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
-index 400b2ba5..ce8fceeb 100644
+index 400b2ba5..f55eb8a4 100644
 --- a/runtime/spu/spu_context.h
 +++ b/runtime/spu/spu_context.h
 @@ -433,6 +433,12 @@ typedef struct spu_context {
@@ -10826,17 +10923,278 @@ index 400b2ba5..ce8fceeb 100644
  } spu_context;
  
  /* event_status is written from more than one host thread: the SPU's own
+@@ -556,6 +562,15 @@ static inline __m128i spu_ls_bswap_words(__m128i x) {
+ }
+ #endif
+ 
++/* SPU_LS_PROBES=0 compiles the diagnostics gate out of spu_ls_read128 and
++ * spu_ls_write128 in the translation unit (a build option for the lifted SPU
++ * sources): no SPU_LS_LOWREAD, SPU_LS_WATCH, SPU_SMC_WATCH or SPU_WWS_PROBE on
++ * those accesses, and no gate word to reload after every store. Default 1: the
++ * env-driven diagnostics stay available at one load and one branch per access. */
++#ifndef SPU_LS_PROBES
++#define SPU_LS_PROBES 1
++#endif
++
+ /* Debug probes of spu_ls_read128/write128, out of line: inlined they kept
+  * every LS load a real call (~10% of GH3's FMOD mixer task).
+  *
+@@ -644,8 +659,10 @@ static SPU_NOINLINE_COLD void spu_ls_read_diag(const spu_context* ctx, uint32_t
+ static inline u128 spu_ls_read128(const spu_context* ctx, uint32_t lsa)
+ {
+     u128 v;
++#if SPU_LS_PROBES
+     if (__builtin_expect(g_spu_ls_rdiag != 0, 0))
+         spu_ls_read_diag(ctx, lsa);
++#endif
+     lsa &= SPU_LS_MASK & ~0xFu;
+     const uint8_t* p = &ctx->ls[lsa];
+ #if defined(__ARM_NEON)
+@@ -765,8 +782,12 @@ static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
+         p[i*4 + 3] = (uint8_t)w;
+     }
+ #endif
++#if SPU_LS_PROBES
+     if (__builtin_expect(g_spu_ls_wdiag != 0, 0))
+         spu_ls_write_diag(ctx, lsa, val);
++#else
++    (void)val;
++#endif
+ }
+ 
+ /* ---------------------------------------------------------------------------
 diff --git a/runtime/spu/spu_dma.h b/runtime/spu/spu_dma.h
-index 8c4ccaa8..582f8d12 100644
+index 8c4ccaa8..f6765a89 100644
 --- a/runtime/spu/spu_dma.h
 +++ b/runtime/spu/spu_dma.h
-@@ -203,6 +203,19 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -25,6 +25,11 @@
+ #include <stdio.h>
+ #include "../platform/win32_compat.h"
+ 
++/* SPU_JOBSTATS=1 (local patch #70): counters per WWS job module, see spu_channels.c. */
++extern int g_spu_js_on;
++void spu_js_note(int kind, uint32_t n);
++#define SPU_JS(kind, n) do { if (__builtin_expect(g_spu_js_on != 0, 0)) spu_js_note((kind), (n)); } while (0)
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+@@ -163,6 +168,182 @@ static inline int mfc_is_fence(uint32_t cmd)
+     return (cmd & 0x02) != 0; /* fence variants have bit 1 set */
+ }
+ 
++/* The PUT half of mfc_do_transfer (local store -> main memory), kept as one function so the
++ * fast path and the diagnostic path share it. */
++static inline void mfc_put_tail(spu_context* spu, uint32_t lsa, uint64_t ea, uint32_t size,
++                                uint8_t* ea_ptr, uint8_t* ls_ptr)
++{
++        /* PUT: local store -> main memory.
++         *
++         * A plain PUT is a store by another processor as far as every SPU
++         * holding a reservation on the lines it covers is concerned: on
++         * hardware those reservations are lost and their SPUs take
++         * SPU_EVENT_LR. Unannounced, a peer's pending PUTLLC compares its
++         * snapshot against a line this copy has already replaced and commits
++         * over it, and a peer parked on RdEventStat sleeps through the write.
++         *
++         * So a reserved line's copy and its notify run as ONE critical section
++         * under the lock-line lock -- the same contract the PPU store path and
++         * the PUTLLC commit keep, and the only way the copy cannot land inside
++         * a peer's compare-and-commit window. Only the reserved lines need it:
++         * in a multi-line span the others are copied first, without the lock,
++         * exactly as an unreserved span is, and the locked pass then copies the
++         * lines it skipped and notifies every reserved one. A line reserved
++         * after its unlocked copy is notified there but NOT copied again: a
++         * peer may already have reserved and committed it on top of our bytes,
++         * and a second copy would write that commit back over. A wide PUT that
++         * touches one queue line no longer holds every other SPU's atomics off
++         * for the whole copy. Spans
++         * that touch no reserved line keep the lock-free copy: bulk asset PUTs
++         * are large and hot, and the scan is a bitmap bit per 128 bytes against
++         * a global that stays zero until an SPU reserves its first line.
++         *
++         * The unreserved path re-checks afterwards because a line can be
++         * reserved between the scan and the end of the copy. That peer's
++         * snapshot may be torn, so it gets its event and loses its reservation
++         * rather than committing against a line it never saw whole. */
++        {
++            extern int  spu_coh_is_reserved(uint32_t);
++            extern void spu_coh_notify_write(uint32_t);
++            extern void spu_coh_notify_write_except(uint32_t, const void*);
++            extern void spu_lockline_lock(void);
++            extern void spu_lockline_unlock(void);
++            extern void spu_lockguard_check(spu_context*, uint32_t, const uint8_t*, uint32_t, const char*);
++            spu_lockguard_check(spu, (uint32_t)ea, (const uint8_t*)ls_ptr, size, "PUT");
++            uint32_t a0 = (uint32_t)ea & ~127u;
++            uint32_t a1 = ((uint32_t)ea + size - 1u) & ~127u;
++            int span_reserved = 0;
++            for (uint32_t a = a0; ; a += 128u) {
++                if (spu_coh_is_reserved(a)) { span_reserved = 1; break; }
++                if (a == a1) break;
++            }
++            /* Lines the unlocked pass left for the locked one: a 16 KiB
++             * transfer spans at most 129 lines. */
++            uint64_t locked_lines[3] = {0, 0, 0};
++            if (span_reserved && a0 != a1 && ((a1 - a0) >> 7) < 64u * 3u) {
++                const uint32_t ea32 = (uint32_t)ea;
++                uint32_t i = 0;
++                for (uint32_t a = a0; ; a += 128u, i++) {
++                    const uint32_t lo = a > ea32 ? a - ea32 : 0u;
++                    const uint32_t hi = a + 128u - ea32 < size ? a + 128u - ea32 : size;
++                    if (spu_coh_is_reserved(a)) locked_lines[i >> 6] |= 1ull << (i & 63u);
++                    else memcpy(ea_ptr + lo, ls_ptr + lo, hi - lo);
++                    if (a == a1) break;
++                }
++                spu_lockline_lock();
++                i = 0;
++                for (uint32_t a = a0; ; a += 128u, i++) {
++                    const uint32_t lo = a > ea32 ? a - ea32 : 0u;
++                    const uint32_t hi = a + 128u - ea32 < size ? a + 128u - ea32 : size;
++                    if ((locked_lines[i >> 6] >> (i & 63u)) & 1u) {
++                        memcpy(ea_ptr + lo, ls_ptr + lo, hi - lo);
++                        spu_coh_notify_write_except(a, spu);
++                    } else if (spu_coh_is_reserved(a)) {
++                        spu_coh_notify_write_except(a, spu);   /* reserved after its copy */
++                    }
++                    if (a == a1) break;
++                }
++                spu_lockline_unlock();
++            } else if (span_reserved) {
++                spu_lockline_lock();
++                memcpy(ea_ptr, ls_ptr, size);
++                for (uint32_t a = a0; ; a += 128u) {
++                    if (spu_coh_is_reserved(a)) spu_coh_notify_write_except(a, spu);
++                    if (a == a1) break;
++                }
++                spu_lockline_unlock();
++            } else {
++                memcpy(ea_ptr, ls_ptr, size);
++                for (uint32_t a = a0; ; a += 128u) {
++                    if (spu_coh_is_reserved(a)) {
++                        spu_lockline_lock();
++                        spu_coh_notify_write_except(a, spu);
++                        spu_lockline_unlock();
++                    }
++                    if (a == a1) break;
++                }
++            }
++        }
++        /* Tell whoever is listening where this PUT landed.
++         *
++         * A title whose SPUs build the RSX command stream never tells libgcm
++         * where that stream is -- it hands the RSX a `put` offset and nothing
++         * else -- so the DMA that writes it is the only evidence of which
++         * buffer the RSX is actually bound to. The GCM layer installs this to
++         * find the pushbuffer; NULL for every title that does not. */
++        { extern void (*g_spu_put_hook)(uint32_t ea, uint32_t size);
++          if (g_spu_put_hook) g_spu_put_hook((uint32_t)ea, size); }
++        /* Bink sync-area watch (armed by the PPU barrier probe): log SPU PUTs
++         * that touch the per-SPU lane counters. */
++        { extern uint32_t g_barrier_sync_watch;
++          uint32_t b = g_barrier_sync_watch;
++          if (b && (uint32_t)ea < b + 0xC0 && (uint32_t)ea + size > b + 0x40) {
++              static int _n = 0;
++              if (PS3_LOG_FIRST(_n, 64)) {
++                  /* spuNum lives in the kernel context at LS 0x1C8 (BE u32). */
++                  uint32_t sn = ((uint32_t)spu->ls[0x1C8]<<24)|((uint32_t)spu->ls[0x1C9]<<16)|
++                                ((uint32_t)spu->ls[0x1CA]<<8)|spu->ls[0x1CB];
++                  const uint8_t* lp = (const uint8_t*)ls_ptr;   /* the 16B being PUT */
++                  fprintf(stderr, "[sync-PUT] spuNum=%u pc=0x%05X ea=0x%08X (sync+0x%X) row={%02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X}\n",
++                          sn, (uint32_t)spu->pc, (uint32_t)ea, (uint32_t)ea - b,
++                          lp[0],lp[1],lp[2],lp[3],lp[4],lp[5],lp[6],lp[7],
++                          lp[8],lp[9],lp[10],lp[11],lp[12],lp[13],lp[14],lp[15]);
++              }
++          } }
++        /* POISON-DMA detector: does an SPU PUT write the singleton object region
++         * (0x40003000-0x40005000) or carry the 0xC708C708 poison? This host-side
++         * memcpy bypasses vm_write32/AWATCH, so it's the prime suspect for the
++         * garbage fn-ptr fields that cause the 0xC708C708 vcall crash.
++         * PUTs outside the region are only scanned for the poison word with
++         * SPU_POISON_DMA_WATCH=1 (see below). */
++        { uint32_t e = (uint32_t)ea;
++          int hitregion = (e < 0x40005000u && e + size > 0x40003000u);
++          int haspoison = 0;
++          static int s_poison_watch = -1;
++          /* SPU_POISON_DMA_WATCH=1 (any value): scan every PUT payload for the
++           * poison word and also log PUTs that carry it outside the region.
++           * Unset, only PUTs into the region are scanned (their lines are
++           * unchanged): the scan is a second pass over every byte of every PUT. */
++          if (s_poison_watch < 0) s_poison_watch = getenv("SPU_POISON_DMA_WATCH") ? 1 : 0;
++          if (hitregion || s_poison_watch)
++          for (uint32_t o = 0; o + 4 <= size; o += 4) {
++              uint32_t w; memcpy(&w, (const char*)ls_ptr + o, 4);
++              if (w == 0x08C708C7u) { haspoison = 1; break; } /* 0xC708C708 BE in LS bytes */
++          }
++          if (hitregion || haspoison) {
++              static int _n = 0;
++              if (PS3_LOG_FIRST(_n, 12))
++                  fprintf(stderr, "[POISON-DMA] img%u PUT ea=0x%08X size=0x%X lsa=0x%X hitregion=%d haspoison=%d\n",
++                          spu->image_id, e, size, lsa, hitregion, haspoison);
++          } }
++}
++
++/* Local patch #70 (fast path): mfc_do_transfer walks about twenty env-gated diagnostics before it
++ * copies a byte, and the job modules issue ~4 million transfers a second (70-150 bytes each).
++ * mfc_fast_enabled() is 1 when none of those diagnostics is switched on; the common transfer
++ * (well-formed, committed, GET or PUT, no watch armed) then skips straight to the copy.
++ * SPU_DMA_FAST=0 = always the full path. */
++static inline int mfc_fast_enabled(void)
++{
++    static int s = -1;
++    if (__builtin_expect(s < 0, 0)) {
++        static const char* const names[] = {
++            "SPU_PUTLOG", "SPU_DMA_WATCH", "SPU_DMA_RANGE", "SPU_DMA_LAX",
++            "SPU_DMACHK", "SPU_PUTHIST", "SPU_GETHIST", "SPU_MFC_TRACE", "SPU_STACKEA_WATCH",
++            "SPU_DMATRACE_ALL", "YDKJ_DMA_IMG", "SPU_DUMP_GET", "SPU_DSP_IMAGE_EA", "LBP_SKIP_NULL_DMA",
++            "SPU_OVL_DIAG", "SPU_SMC_WATCH", "SPU_POISON_DMA_WATCH", "SPU_DMA_SKIP_DUMP", 0 };
++        int on = 1;
++        const char* f = getenv("SPU_DMA_FAST");
++        if (f && *f == '0') on = 0;
++        for (int i = 0; names[i]; i++) if (getenv(names[i])) on = 0;
++#ifdef SPU_DMA_LOG
++        on = 0;
++#endif
++        s = on;
++    }
++    return s;
++}
++
+ /*
+  * Execute a single DMA transfer between local store and main memory.
+  * Returns 0 on success, -1 on error.
+@@ -170,6 +351,7 @@ static inline int mfc_is_fence(uint32_t cmd)
+ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+                                    uint32_t size, uint32_t cmd)
+ {
++    SPU_JS(1, size);
+     /* Upper16 command-channel bits carry replacement/transfer class IDs. */
+     if ((cmd & 0xFFFFu) == MFC_SDCRZ_CMD) {
+         /* CBEA 1.02 section 7.7.3: SDCRZ writes zeros in EA space, without an
+@@ -203,6 +385,37 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
          spu_lockline_unlock();
          return 0;
      }
 +    /* SPU_PUTLOG=<n>: log the first n PUTs (img, LS source, EA, size, FNV-1a of the data and the
 +     * first word of the job code buffer at LS 0x4000) -- diff a lifted-job run against an
 +     * interpreted one to find the job output that differs. */
++    /* Fast path (local patch #70), see mfc_fast_enabled(). */
++    if (__builtin_expect(mfc_fast_enabled(), 1) && g_spu_ls_watch_n == 0 && spu->image_id != 22 &&
++        (ea >> 32) == 0 && (uint32_t)ea >= 0x10000u && size != 0 && size <= MFC_MAX_DMA_SIZE &&
++        (size < 16 || !(size & 15)) && !((lsa ^ (uint32_t)ea) & 15) &&
++        (uint64_t)(lsa & SPU_LS_MASK) + size <= (uint64_t)SPU_LS_SIZE &&
++        (mfc_is_get(cmd) || mfc_is_put(cmd)) && mfc_ea_range_committed(ea, size)) {
++        const uint32_t fl = lsa & SPU_LS_MASK;
++        uint8_t* fls = &spu->ls[fl];
++        uint8_t* fea = vm_base + (uint32_t)ea;
++        if (mfc_is_get(cmd)) {
++            extern void spu_overlay_note_get(spu_context*, uint32_t, const uint8_t*, uint32_t);
++            memcpy(fls, fea, size);
++            spu_overlay_note_get(spu, (uint32_t)ea, (const uint8_t*)fls, size);
++        } else {
++            mfc_put_tail(spu, fl, ea, size, fea, fls);
++        }
++        return 0;
++    }
 +    { static long s_pl = -1; static volatile long s_pn = 0;
 +      if (s_pl < 0) { const char* e = getenv("SPU_PUTLOG"); s_pl = e ? atol(e) : 0; }
 +      if (s_pl && ((cmd & 0xF0u) == 0x20u) && size && lsa + size <= 0x40000u && s_pn < s_pl) {
@@ -10850,7 +11208,7 @@ index 8c4ccaa8..582f8d12 100644
      /* SPU_DMA_WATCH=<hex>: report any transfer whose destination RANGE covers
       * this guest address. A DMA landing in the loaded ELF image is always a
       * bug, and it is invisible to the sampling traces -- YDKJ had an SPU job
-@@ -227,9 +240,26 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -227,9 +440,26 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
            if (e) { char* d; s_lo = (uint32_t)strtoul(e, &d, 16); if (*d == '-') s_hi = (uint32_t)strtoul(d + 1, 0, 16); } }
        if (s_hi && (uint32_t)ea < s_hi && (uint32_t)ea + size > s_lo) {
            static int _n = 0;
@@ -10880,7 +11238,158 @@ index 8c4ccaa8..582f8d12 100644
            /* ...and every 5 s, the bytes PUT into / GOT from the range. */
            { static volatile long long s_put, s_get; static unsigned long long s_t0;
              extern unsigned long long ps3_ms_now(void);
-@@ -1395,6 +1425,28 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -643,149 +873,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+               }
+           } }
+     } else if (mfc_is_put(cmd)) {
+-        /* PUT: local store -> main memory.
+-         *
+-         * A plain PUT is a store by another processor as far as every SPU
+-         * holding a reservation on the lines it covers is concerned: on
+-         * hardware those reservations are lost and their SPUs take
+-         * SPU_EVENT_LR. Unannounced, a peer's pending PUTLLC compares its
+-         * snapshot against a line this copy has already replaced and commits
+-         * over it, and a peer parked on RdEventStat sleeps through the write.
+-         *
+-         * So a reserved line's copy and its notify run as ONE critical section
+-         * under the lock-line lock -- the same contract the PPU store path and
+-         * the PUTLLC commit keep, and the only way the copy cannot land inside
+-         * a peer's compare-and-commit window. Only the reserved lines need it:
+-         * in a multi-line span the others are copied first, without the lock,
+-         * exactly as an unreserved span is, and the locked pass then copies the
+-         * lines it skipped and notifies every reserved one. A line reserved
+-         * after its unlocked copy is notified there but NOT copied again: a
+-         * peer may already have reserved and committed it on top of our bytes,
+-         * and a second copy would write that commit back over. A wide PUT that
+-         * touches one queue line no longer holds every other SPU's atomics off
+-         * for the whole copy. Spans
+-         * that touch no reserved line keep the lock-free copy: bulk asset PUTs
+-         * are large and hot, and the scan is a bitmap bit per 128 bytes against
+-         * a global that stays zero until an SPU reserves its first line.
+-         *
+-         * The unreserved path re-checks afterwards because a line can be
+-         * reserved between the scan and the end of the copy. That peer's
+-         * snapshot may be torn, so it gets its event and loses its reservation
+-         * rather than committing against a line it never saw whole. */
+-        {
+-            extern int  spu_coh_is_reserved(uint32_t);
+-            extern void spu_coh_notify_write(uint32_t);
+-            extern void spu_coh_notify_write_except(uint32_t, const void*);
+-            extern void spu_lockline_lock(void);
+-            extern void spu_lockline_unlock(void);
+-            extern void spu_lockguard_check(spu_context*, uint32_t, const uint8_t*, uint32_t, const char*);
+-            spu_lockguard_check(spu, (uint32_t)ea, (const uint8_t*)ls_ptr, size, "PUT");
+-            uint32_t a0 = (uint32_t)ea & ~127u;
+-            uint32_t a1 = ((uint32_t)ea + size - 1u) & ~127u;
+-            int span_reserved = 0;
+-            for (uint32_t a = a0; ; a += 128u) {
+-                if (spu_coh_is_reserved(a)) { span_reserved = 1; break; }
+-                if (a == a1) break;
+-            }
+-            /* Lines the unlocked pass left for the locked one: a 16 KiB
+-             * transfer spans at most 129 lines. */
+-            uint64_t locked_lines[3] = {0, 0, 0};
+-            if (span_reserved && a0 != a1 && ((a1 - a0) >> 7) < 64u * 3u) {
+-                const uint32_t ea32 = (uint32_t)ea;
+-                uint32_t i = 0;
+-                for (uint32_t a = a0; ; a += 128u, i++) {
+-                    const uint32_t lo = a > ea32 ? a - ea32 : 0u;
+-                    const uint32_t hi = a + 128u - ea32 < size ? a + 128u - ea32 : size;
+-                    if (spu_coh_is_reserved(a)) locked_lines[i >> 6] |= 1ull << (i & 63u);
+-                    else memcpy(ea_ptr + lo, ls_ptr + lo, hi - lo);
+-                    if (a == a1) break;
+-                }
+-                spu_lockline_lock();
+-                i = 0;
+-                for (uint32_t a = a0; ; a += 128u, i++) {
+-                    const uint32_t lo = a > ea32 ? a - ea32 : 0u;
+-                    const uint32_t hi = a + 128u - ea32 < size ? a + 128u - ea32 : size;
+-                    if ((locked_lines[i >> 6] >> (i & 63u)) & 1u) {
+-                        memcpy(ea_ptr + lo, ls_ptr + lo, hi - lo);
+-                        spu_coh_notify_write_except(a, spu);
+-                    } else if (spu_coh_is_reserved(a)) {
+-                        spu_coh_notify_write_except(a, spu);   /* reserved after its copy */
+-                    }
+-                    if (a == a1) break;
+-                }
+-                spu_lockline_unlock();
+-            } else if (span_reserved) {
+-                spu_lockline_lock();
+-                memcpy(ea_ptr, ls_ptr, size);
+-                for (uint32_t a = a0; ; a += 128u) {
+-                    if (spu_coh_is_reserved(a)) spu_coh_notify_write_except(a, spu);
+-                    if (a == a1) break;
+-                }
+-                spu_lockline_unlock();
+-            } else {
+-                memcpy(ea_ptr, ls_ptr, size);
+-                for (uint32_t a = a0; ; a += 128u) {
+-                    if (spu_coh_is_reserved(a)) {
+-                        spu_lockline_lock();
+-                        spu_coh_notify_write_except(a, spu);
+-                        spu_lockline_unlock();
+-                    }
+-                    if (a == a1) break;
+-                }
+-            }
+-        }
+-        /* Tell whoever is listening where this PUT landed.
+-         *
+-         * A title whose SPUs build the RSX command stream never tells libgcm
+-         * where that stream is -- it hands the RSX a `put` offset and nothing
+-         * else -- so the DMA that writes it is the only evidence of which
+-         * buffer the RSX is actually bound to. The GCM layer installs this to
+-         * find the pushbuffer; NULL for every title that does not. */
+-        { extern void (*g_spu_put_hook)(uint32_t ea, uint32_t size);
+-          if (g_spu_put_hook) g_spu_put_hook((uint32_t)ea, size); }
+-        /* Bink sync-area watch (armed by the PPU barrier probe): log SPU PUTs
+-         * that touch the per-SPU lane counters. */
+-        { extern uint32_t g_barrier_sync_watch;
+-          uint32_t b = g_barrier_sync_watch;
+-          if (b && (uint32_t)ea < b + 0xC0 && (uint32_t)ea + size > b + 0x40) {
+-              static int _n = 0;
+-              if (PS3_LOG_FIRST(_n, 64)) {
+-                  /* spuNum lives in the kernel context at LS 0x1C8 (BE u32). */
+-                  uint32_t sn = ((uint32_t)spu->ls[0x1C8]<<24)|((uint32_t)spu->ls[0x1C9]<<16)|
+-                                ((uint32_t)spu->ls[0x1CA]<<8)|spu->ls[0x1CB];
+-                  const uint8_t* lp = (const uint8_t*)ls_ptr;   /* the 16B being PUT */
+-                  fprintf(stderr, "[sync-PUT] spuNum=%u pc=0x%05X ea=0x%08X (sync+0x%X) row={%02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X}\n",
+-                          sn, (uint32_t)spu->pc, (uint32_t)ea, (uint32_t)ea - b,
+-                          lp[0],lp[1],lp[2],lp[3],lp[4],lp[5],lp[6],lp[7],
+-                          lp[8],lp[9],lp[10],lp[11],lp[12],lp[13],lp[14],lp[15]);
+-              }
+-          } }
+-        /* POISON-DMA detector: does an SPU PUT write the singleton object region
+-         * (0x40003000-0x40005000) or carry the 0xC708C708 poison? This host-side
+-         * memcpy bypasses vm_write32/AWATCH, so it's the prime suspect for the
+-         * garbage fn-ptr fields that cause the 0xC708C708 vcall crash.
+-         * PUTs outside the region are only scanned for the poison word with
+-         * SPU_POISON_DMA_WATCH=1 (see below). */
+-        { uint32_t e = (uint32_t)ea;
+-          int hitregion = (e < 0x40005000u && e + size > 0x40003000u);
+-          int haspoison = 0;
+-          static int s_poison_watch = -1;
+-          /* SPU_POISON_DMA_WATCH=1 (any value): scan every PUT payload for the
+-           * poison word and also log PUTs that carry it outside the region.
+-           * Unset, only PUTs into the region are scanned (their lines are
+-           * unchanged): the scan is a second pass over every byte of every PUT. */
+-          if (s_poison_watch < 0) s_poison_watch = getenv("SPU_POISON_DMA_WATCH") ? 1 : 0;
+-          if (hitregion || s_poison_watch)
+-          for (uint32_t o = 0; o + 4 <= size; o += 4) {
+-              uint32_t w; memcpy(&w, (const char*)ls_ptr + o, 4);
+-              if (w == 0x08C708C7u) { haspoison = 1; break; } /* 0xC708C708 BE in LS bytes */
+-          }
+-          if (hitregion || haspoison) {
+-              static int _n = 0;
+-              if (PS3_LOG_FIRST(_n, 12))
+-                  fprintf(stderr, "[POISON-DMA] img%u PUT ea=0x%08X size=0x%X lsa=0x%X hitregion=%d haspoison=%d\n",
+-                          spu->image_id, e, size, lsa, hitregion, haspoison);
+-          } }
++        mfc_put_tail(spu, lsa, ea, size, ea_ptr, ls_ptr);
+     }
+ 
+     return 0;
+@@ -1395,6 +1483,28 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
          return 0;
      }
  
@@ -10909,7 +11418,7 @@ index 8c4ccaa8..582f8d12 100644
      /* DMA trace for the cri task (image 22): log each transfer's LS/EA/size so we
       * can see the work-fetch GET (func_000040F0) that precedes the branch-to-0 and
       * whether its source EA holds valid work-queue data. Env SPU_DMATRACE_ALL. */
-@@ -1419,14 +1471,14 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1419,14 +1529,14 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
          }
          if ((dt && (spu->image_id==22 || spu->image_id==23)) ||
              only==-3 || (only >= 0 && spu->image_id == only)) {
@@ -10927,7 +11436,7 @@ index 8c4ccaa8..582f8d12 100644
                  const uint8_t* s = vm_base + (uint32_t)ea;
                  fprintf(stderr, "        got:");
 diff --git a/runtime/spu/spu_drain.c b/runtime/spu/spu_drain.c
-index 49bc2b94..55f5cea5 100644
+index 49bc2b94..0c0808df 100644
 --- a/runtime/spu/spu_drain.c
 +++ b/runtime/spu/spu_drain.c
 @@ -5,6 +5,7 @@
@@ -11006,17 +11515,28 @@ index 49bc2b94..55f5cea5 100644
      const uint8_t* v = ctx->ls;      /* vector word at LS 0, big-endian */
      uint32_t w = ((uint32_t)v[0] << 24) | ((uint32_t)v[1] << 16) |
                   ((uint32_t)v[2] << 8) | v[3];
-@@ -562,7 +606,8 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
+@@ -538,8 +582,10 @@ typedef void (*spu_drain_fn)(spu_context*);
+ extern spu_drain_fn spu_lookup(uint32_t addr, int image_id);
+ 
+ 
++extern int g_spu_js_on; void spu_js_note(int kind, uint32_t n);
+ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
+ {
++    if (__builtin_expect(g_spu_js_on != 0, 0)) spu_js_note(3, 0);
+     if (__builtin_expect(g_spu_direct < 0, 0)) spu_direct_init();
+     spu_depth_guard_check(ctx);
+     /* On the way out, the enclosing drain's return pc is the innermost one
+@@ -562,7 +608,8 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
       * thread, so resolve it once per drain instead of once per access. */
      void (**const tramp)(spu_context*) = &g_spu_trampoline_fn;
  
 -#define SPU_DRAIN_POP_IRQ() do { if (ctx->irq_frame == &f) ctx->irq_frame = f.prev; ctx->drain_ret_pc = outer_ret_pc; } while (0)
 +/* PS3_FTRACE (local patch #39): a WWS job ends when the drain of the manager's call returns. */
-+#define SPU_DRAIN_POP_IRQ() do { if (ctx->irq_frame == &f) ctx->irq_frame = f.prev; ctx->drain_ret_pc = outer_ret_pc;         if (PS3_FT_ON()) { extern void spu_ft_job_return(spu_context*, uint32_t); spu_ft_job_return(ctx, return_pc); } } while (0)
++#define SPU_DRAIN_POP_IRQ() do { if (ctx->irq_frame == &f) ctx->irq_frame = f.prev; ctx->drain_ret_pc = outer_ret_pc;         if (PS3_FT_ON() || g_spu_js_on > 0) { extern void spu_ft_job_return(spu_context*, uint32_t); spu_ft_job_return(ctx, return_pc); } } while (0)
      for (;;) {
          while (*tramp) {
              if (*tramp == spu_indirect_branch &&
-@@ -610,6 +655,20 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
+@@ -610,6 +657,20 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
              uint32_t pc = ctx->pc & SPU_LS_MASK;
              spu_drain_fn fn = ctx->resident_ovl ? spu_lookup(pc, ctx->resident_ovl) : 0;
              if (!fn) fn = spu_lookup(pc, ctx->image_id);
