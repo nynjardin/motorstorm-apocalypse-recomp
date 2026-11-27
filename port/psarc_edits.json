@@ -66,5 +66,35 @@
         "<Text macro=\"LobbyTimer\" name=\"LobbyIntermission\" string=\"$RaceLobbyLogic/GetIntermissionString\" /><Text name=\"PortLanCount\" css_style=\"playerlisttext\" offsetx=\"3000px\" offsety=\"3000px\" width=\"10px\" height=\"10px\" string=\"$'~MSLC~' + ToString(PlayerlistManager/ActualPlayerCount)\" /><Text name=\"PortLanMode\" css_style=\"playerlisttext\" offsetx=\"3000px\" offsety=\"3000px\" width=\"10px\" height=\"10px\" string=\"$'~MSLM~' + UserGameModeManager/CurrentMode/Info/Name\" /><Text name=\"PortLanHost\" css_style=\"playerlisttext\" offsetx=\"3000px\" offsety=\"3000px\" width=\"10px\" height=\"10px\" string=\"$'~MSLH~' + ToString(IfInt(NetGlobalData/WorldWeAreMaster,1,0))\" /><Text name=\"PortLanTrack\" css_style=\"playerlisttext\" offsetx=\"3000px\" offsety=\"3000px\" width=\"10px\" height=\"10px\" string=\"$'~MSLT~' + GetTrackName(RaceLobbyLogic/TrackId)\" />"
       ]
     ]
+  },
+  {
+    "file": "/ui/fe/boot_sequence.xml",
+    "strip_comments": true,
+    "replace": [
+      [
+        "<Flow delay=\"10\" target=\"LegalInformation\" />",
+        "<Flow delay=\"10\" target=\"LegalInformation\" /><Flow button=\"start\" target=\"TitleScreen\" />"
+      ],
+      [
+        "<Flow macro=\"five second delay\" target=\"AutoSaveWarning\" />",
+        "<Flow macro=\"five second delay\" target=\"AutoSaveWarning\" /><Flow button=\"start\" target=\"TitleScreen\" />"
+      ],
+      [
+        "<Text lams=\"BootSequence::AutosaveWarning\" x=\"320px\" width=\"640px\" y=\"182px\" multiline=\"true\" css_style=\"FontConBl_26pt_C_align_White\" line_spacing=\"5px\" />",
+        "<Text lams=\"BootSequence::AutosaveWarning\" x=\"320px\" width=\"640px\" y=\"182px\" multiline=\"true\" css_style=\"FontConBl_26pt_C_align_White\" line_spacing=\"5px\" /><Flow button=\"start\" target=\"TitleScreen\" />"
+      ],
+      [
+        "<Flow macro=\"five second delay\" target=\"EvolutionStudios\" />",
+        "<Flow macro=\"five second delay\" target=\"EvolutionStudios\" /><Flow button=\"start\" target=\"TitleScreen\" />"
+      ],
+      [
+        "<Flow manual=\"true\" name=\"LogoVideoFinished\" target=\"VidIntermediaryScreen\" />",
+        "<Flow manual=\"true\" name=\"LogoVideoFinished\" target=\"VidIntermediaryScreen\" /><Flow button=\"start\" target=\"TitleScreen\" />"
+      ],
+      [
+        "<Flow button=\"accept\" target=\"TitleScreen\" />",
+        "<Flow button=\"accept\" target=\"TitleScreen\" /><Flow button=\"start\" target=\"TitleScreen\" />"
+      ]
+    ]
   }
 ]

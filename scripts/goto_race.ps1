@@ -62,10 +62,16 @@ if (Test-Path (Join-Path $save 'AUTOSAVE.DAT')) {
 }
 $env:PAD_FILE = $pad
 foreach ($k in $Env.Keys) { Set-Item -Path "env:$k" -Value $Env[$k] }
+# The game's own "Switching Screen" lines (PORT_GAME_LOG filter: almost free) say which screen is up:
+# START skips the boot screens (port\psarc_edits.json, boot_sequence.xml; docs\hle.md) and the title
+# screen is detected by its line.
+$ownLog = -not $env:PORT_GAME_LOG
+if ($ownLog) { $env:PORT_GAME_LOG = 'Switching Screen' }
 Start-Process -FilePath cmd.exe -ArgumentList '/c', (Join-Path $port 'run.bat') -WindowStyle Minimized
 # The game has its environment now: remove what -Env set, or the next launch from this same
 # PowerShell session inherits it (a chained A/B pair then compares B with B).
 foreach ($k in $Env.Keys) { Remove-Item -Path "env:$k" -ErrorAction SilentlyContinue }
+if ($ownLog) { Remove-Item -Path 'env:PORT_GAME_LOG' -ErrorAction SilentlyContinue }
 Start-Sleep 5
 
 $script:step = 0
@@ -86,18 +92,28 @@ function Send-Pad([string]$mask, [double]$wait) {
 }
 
 $t0 = Get-Date
-while (-not (Test-Path $log) -or -not (Select-String -Path $log -Pattern 'maintitles' -Quiet)) {
+$bootScreens = 'HealthWarning', 'LegalInformation', 'AutoSaveWarning', 'SCEEPresents', 'EvolutionStudios', 'VidIntermediaryScreen', 'GameIntro'
+$lastStart = [datetime]::MinValue; $lastChange = Get-Date
+while (-not (Test-Path $log) -or -not (Select-String -Path $log -Pattern 'to "TitleScreen"' -Quiet)) {
     if (-not (Get-Process MotorStormApocalypse -ErrorAction SilentlyContinue)) { throw 'game exited before the title screen' }
     if (((Get-Date) - $t0).TotalSeconds -gt $TitleTimeout) { throw 'title screen not reached' }
-    Start-Sleep 2
+    Start-Sleep -Milliseconds 400
+    # START on a boot screen skips it (one press per screen: pressed again after 1.5 s if it is still up).
+    if (Test-Path $log) {
+        $cur = Select-String -Path $log -Pattern 'Switching Screen "[^"]*" to "([^"]*)"' | Select-Object -Last 1
+        if ($cur -and ($bootScreens -contains $cur.Matches[0].Groups[1].Value) -and ((Get-Date) - $lastStart).TotalSeconds -gt 1.5) {
+            try { Set-Content -Path $pad -Value '0x0008 4' -NoNewline -ErrorAction Stop; Start-Sleep -Milliseconds 300; Set-Content -Path $pad -Value '' -NoNewline -ErrorAction Stop } catch { }
+            $lastStart = Get-Date
+        }
+    }
     # Freeze rule: window title (FPS) unchanged for 10 s = frozen; game left running for inspection.
     $gp = Get-Process MotorStormApocalypse -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
     if ($gp) { $gp.Refresh(); $gt = $gp.MainWindowTitle
-        if ($gt -match 'FPS: [1-9]' -and $gt -eq $script:lastTitle) { $script:sameTitle++ } else { $script:sameTitle = 0; $script:lastTitle = $gt }
-        if ($script:sameTitle -ge 8) { throw 'FROZEN before the title screen (title unchanged for 16 s); game left running' } }
+        if (-not ($gt -match 'FPS: [1-9]') -or $gt -ne $script:lastTitle) { $script:lastTitle = $gt; $lastChange = Get-Date }
+        elseif (((Get-Date) - $lastChange).TotalSeconds -ge 16) { throw 'FROZEN before the title screen (title unchanged for 16 s); game left running' } }
 }
 Write-Host ("title screen after {0:N0}s" -f ((Get-Date) - $t0).TotalSeconds)
-Start-Sleep -Milliseconds ([int](6000 * $MenuScale))   # maintitles (short clip) -> title screen (was 15 s)
+Start-Sleep -Milliseconds ([int](2500 * $MenuScale))   # the title screen is up (its own log line); it takes a moment to accept a button
 Send-Pad '0x4000 8' 4      # X: title -> main menu
 # The main menu takes 5-10 s to appear (white flash first, ~12 draws): a DOWN sent before it is up is
 # lost, and the next X then opens "Festival" (prologue) instead of "Pour le fun". Wait for the flash

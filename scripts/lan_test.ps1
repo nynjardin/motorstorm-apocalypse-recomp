@@ -63,10 +63,22 @@ function Shot([string]$n, $i) { (& (Join-Path $PSScriptRoot 'screenshot.ps1') -O
 function Count-Log($i, [string]$pattern) { @(Select-String -Path $i.Log -Pattern $pattern).Count }
 function Wait-Title($i) {
     $t0 = Get-Date
-    while (-not (Test-Path $i.Log) -or -not (Select-String -Path $i.Log -Pattern 'maintitles' -Quiet)) {
+    # START skips each boot screen (port\psarc_edits.json); the title screen has its own log line
+    # (PORT_GAME_LOG must let "Switching Screen" through: '1' does).
+    $boot = 'HealthWarning', 'LegalInformation', 'AutoSaveWarning', 'SCEEPresents', 'EvolutionStudios', 'VidIntermediaryScreen', 'GameIntro'
+    $lastStart = [datetime]::MinValue
+    while (-not (Test-Path $i.Log) -or -not (Select-String -Path $i.Log -Pattern 'to "TitleScreen"' -Quiet)) {
         if (((Get-Date) - $t0).TotalSeconds -gt 300) { throw "$($i.Name): title screen not reached" }
-        Start-Sleep 3
+        Start-Sleep -Milliseconds 500
+        if (Test-Path $i.Log) {
+            $cur = Select-String -Path $i.Log -Pattern 'Switching Screen "[^"]*" to "([^"]*)"' | Select-Object -Last 1
+            if ($cur -and ($boot -contains $cur.Matches[0].Groups[1].Value) -and ((Get-Date) - $lastStart).TotalSeconds -gt 1.5) {
+                try { Set-Content -Path $i.Pad -Value '0x0008 4' -NoNewline -ErrorAction Stop; Start-Sleep -Milliseconds 300; Set-Content -Path $i.Pad -Value '' -NoNewline -ErrorAction Stop } catch { }
+                $lastStart = Get-Date
+            }
+        }
     }
+    Start-Sleep 2
     Write-Host ("{0}: title after {1:N0}s" -f $i.Name, ((Get-Date) - $t0).TotalSeconds)
 }
 function To-Multiplayer($to) {
