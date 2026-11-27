@@ -253,7 +253,11 @@ if(SPU_SOURCES)
         # (default), 2 = exact integer-key compares always. build.bat forwards the environment
         # variable of the same name at configure time.
         set(PORT_SPU_FLOAT_XCMP "1" CACHE STRING "SPU float compares with the native arithmetic (0, 1, 2)")
-        set(_spu_xcmp ";SPU_FLOAT_XCMP=${PORT_SPU_FLOAT_XCMP}")
+        # PORT_SPU_LS_PROBES=<0|1> (toolkit PR #841, spu_context.h SPU_LS_PROBES): 0 compiles the
+        # LS diagnostics gate (SPU_LS_WATCH, SPU_SMC_WATCH, SPU_LS_LOWREAD, SPU_WWS_PROBE) out of
+        # every LS load and store of the lifted SPU sources. Default 1 until measured.
+        set(PORT_SPU_LS_PROBES "1" CACHE STRING "LS diagnostics gate in the lifted SPU sources (0, 1)")
+        set(_spu_xcmp ";SPU_FLOAT_XCMP=${PORT_SPU_FLOAT_XCMP};SPU_LS_PROBES=${PORT_SPU_LS_PROBES}")
         if(PORT_SPU_AVX2 AND NOT PORT_SPU_FLOAT_FAST STREQUAL "0")
             set_source_files_properties(${SPU_SOURCES} PROPERTIES
                 COMPILE_DEFINITIONS "SPU_USE_DISPATCH_MT;SPU_FLOAT_FAST=${PORT_SPU_FLOAT_FAST}${_spu_xcmp}")

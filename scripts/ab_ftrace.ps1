@@ -13,7 +13,9 @@ param(
     [string]$Tag = 'ab',
     [string]$Track = 'pont',
     [hashtable]$Env = @{},
-    [hashtable]$ArmEnv = @{}
+    [hashtable]$ArmEnv = @{},
+    [int]$TraceStart = 118,   # since toolkit #69 (2026-11-27) the race scene comes ~109 s after launch (was ~170 s: use 232)
+    [int]$IdleSeconds = 40
 )
 $rp = Join-Path $PSScriptRoot 'race_perf.ps1'
 $fi = Join-Path $PSScriptRoot 'ftrace_idle.py'
@@ -28,11 +30,11 @@ foreach ($arm in $Order) {
     # The start line is reached 195 s after the launch on a quiet machine, 199-203 s under
     # background load: with 62 s of idle the window 232..248 s is inside the idle phase either way.
     # (240..256 lost a trace on 2026-11-24: the quiet run ended at 258 s, before the file was written.)
-    $e = @{ GCM_SEMA_ACQUIRE = '0'; PS3_FTRACE = "232:16:$tr" } + $Env
+    $e = @{ GCM_SEMA_ACQUIRE = '0'; PS3_FTRACE = "${TraceStart}:16:$tr" } + $Env
     if ($Exes[$arm]) { $e['PORT_EXE'] = $Exes[$arm] }
     if ($ArmEnv[$arm]) { foreach ($k in $ArmEnv[$arm].Keys) { $e[$k] = $ArmEnv[$arm][$k] } }
     try {
-        & $rp -Label "abft $Tag $arm" -Track $Track -IdleSeconds 62 -DriveSeconds 2 -Env $e *> $null
+        & $rp -Label "abft $Tag $arm" -Track $Track -IdleSeconds $IdleSeconds -DriveSeconds 2 -Env $e *> $null
         $r = & python $fi $tr 2>&1 | Select-Object -First 12 | Where-Object { $_ -match '^frames:|^  running|^  usleep|^  syscall' }
         Add-Content $out ("== $n $arm " + (Get-Date -Format 'HH:mm:ss'))
         Add-Content $out ($r -join "`n")

@@ -33,6 +33,7 @@ if defined PORT_SPU_FLOAT_FAST set "FFOPT=-DPORT_SPU_FLOAT_FAST=%PORT_SPU_FLOAT_
 rem PORT_SPU_FLOAT_XCMP=<0|1|2> (environment): SPU float compares, 0 = host only (see
 rem CMakeLists.txt; default 1). Unset at "configure" = 1.
 if defined PORT_SPU_FLOAT_XCMP set "FFOPT=%FFOPT% -DPORT_SPU_FLOAT_XCMP=%PORT_SPU_FLOAT_XCMP%"
+if defined PORT_SPU_LS_PROBES set "FFOPT=%FFOPT% -DPORT_SPU_LS_PROBES=%PORT_SPU_LS_PROBES%"
 rem PORT_SPU_FLOAT_EXACT=<a,b,...> (environment): lifted SPU sources kept on the exact float
 rem emulation (path fragments, see CMakeLists.txt). Unset at "configure" = none.
 set "FXOPT=-DPORT_SPU_FLOAT_EXACT="
