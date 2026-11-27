@@ -211,7 +211,7 @@ struct Portable {
             { "SPU_FLOAT_RZ", "1" }, { "GEO_CACHE", "1" }, { "PORT_SIM_RT", "0" },
             { "GCM_SEMA_ACQUIRE", "1" }, { "GCM_SEMA_ACQUIRE_MS", "250" },
             { "RSX_MAX_VERTICES", "3145728" }, { "VP_NOFIXPROJ", "1" },
-            { "PORT_PLAY_VIDEOS", "0" }, { "VDEC_SEQDONE_ASYNC_MS", "30" },
+            { "PORT_PLAY_VIDEOS", "1" }, { "VDEC_SEQDONE_ASYNC_MS", "30" },
         };
         for (const auto& d : kDefaults) env_default(d[0], d[1]);
 

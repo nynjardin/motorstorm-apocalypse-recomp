@@ -195,6 +195,7 @@ add_executable(${PROJECT_NAME}
     hle_overrides.cpp
     port_hwwatch.cpp    # PORT_HWWATCH / PORT_LISTDUMP debugging aids
     net_hooks.cpp       # entry hooks on the title's online code (scripts/func_hooks.py, docs/reseau.md)
+    movie_trace.cpp     # MOVIE_TRACE: in-memory trace of the title's movie player (docs/hle.md "Real movies")
     psarc_patch.cpp     # replacement of files inside ms3.psarc at read time (scripts/psarc_patch.py)
     portable.cpp        # no argument = the exe at the root of the game folder (docs/lanceur.md)
     libsre_lle.cpp

@@ -26,6 +26,7 @@
 extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name, void (*fn)(ppu_context*));
 extern "C" const char* ppu_vfs_root;          /* runtime/ppu/ppu_fs.cpp */
 extern "C" void port_psarc_patch_init(void);  /* psarc_patch.cpp */
+extern "C" void port_movie_trace_init(void);  /* movie_trace.cpp (MOVIE_TRACE) */
 extern "C" void ppu_dump_guest_stack(ppu_context*, const char*);   /* runtime/ppu/ppu_loader.cpp */
 extern "C" void cellFontOpenFontFile(void);   /* libs/font/cellFont.c (HLE), called raw */
 /* libs/font/cellFont.c (HLE) C functions; the font and metrics pointers are guest EAs. */
@@ -588,6 +589,58 @@ static int port_cellFsOpen_skip_videos(ppu_context* c)
     return 0;
 }
 
+/* ---- Movies that play: which file (PORT_PLAY_VIDEOS=1) ------------------------------------------
+ * Fast handler on cellFsOpen, as above, for /dev_bdvd/PS3_GAME/USRDIR/ui/video/<name>.avi:
+ *   - a re-encoded copy <game folder>\recomp\video\<name>.avi (scripts\video_convert.py: H.264, a
+ *     few times smaller) is played instead of the disc's file when it exists, so a copy of the game
+ *     can do without its 16 GB ui\video folder. PORT_VIDEO_CONVERTED=0 = always the disc's file.
+ *   - PORT_VIDEO_AS=<from>:<to> (test): an open of <from>_60.avi plays <to>_60.avi, e.g.
+ *     evologo:r01 puts a Festival movie (5.1 sound, 9 languages, subtitles) on the first boot screen.
+ * The guest path is swapped for /dev_bdvd/recomp/video/..., which the file layer maps under the game
+ * folder like every /dev_bdvd path. */
+static int port_cellFsOpen_videos(ppu_context* c)
+{
+    const uint32_t ea = static_cast<uint32_t>(c->gpr[3]);
+    if (!ea) return 0;
+    char path[512];
+    size_t i = 0;
+    for (; i + 1 < sizeof path && vm_base[ea + i]; ++i) path[i] = (char)vm_base[ea + i];
+    path[i] = 0;
+    static const char kDir[] = "/dev_bdvd/PS3_GAME/USRDIR/ui/video/";
+    if (std::strncmp(path, kDir, sizeof kDir - 1) != 0) return 0;
+    std::string name = path + sizeof kDir - 1;
+    if (name.size() < 5 || name.size() > 64 || name.find('/') != std::string::npos ||
+        _stricmp(name.c_str() + name.size() - 4, ".avi") != 0) return 0;
+
+    static std::mutex m;
+    static unsigned slot = 0;
+    static int conv = -1;
+    static std::string as_from, as_to;
+    std::lock_guard<std::mutex> lk(m);
+    if (conv < 0) {
+        const char* e = std::getenv("PORT_VIDEO_CONVERTED");
+        conv = !(e && e[0] == '0');
+        if (const char* a = std::getenv("PORT_VIDEO_AS"))
+            if (const char* colon = std::strchr(a, ':')) { as_from.assign(a, colon - a); as_to = colon + 1; }
+    }
+    std::string guest;
+    if (!as_from.empty() && name == as_from + "_60.avi") {
+        name = as_to + "_60.avi";
+        guest = std::string(kDir) + name;
+    }
+    if (conv) {
+        const std::string host = std::string(ppu_vfs_root) + "/recomp/video/" + name;
+        if (FILE* f = std::fopen(host.c_str(), "rb")) { std::fclose(f); guest = "/dev_bdvd/recomp/video/" + name; }
+    }
+    if (guest.empty() || guest.size() >= 127) return 0;
+    const uint32_t dst = PORT_SCRATCH_VIDEO_PATH + 128u * (slot++ & 3u);
+    std::memcpy(vm_base + dst, guest.c_str(), guest.size() + 1);
+    static int lines = 0;
+    if (lines < 24) { lines++; std::fprintf(stderr, "[port] video: %s -> %s\n", path, guest.c_str()); }
+    c->gpr[3] = dst;
+    return 0;
+}
+
 /* ---------------------------------------------------------------------------------------------
  * Network: the ONE place that answers "offline" (until our own LAN system replaces PSN).
  *
@@ -698,8 +751,11 @@ extern "C" void port_register_hle_overrides(void)
             std::fprintf(stderr, "[port] PORT_PLAY_VIDEOS set but FFmpeg not found: movies skipped\n");
             play = false;
         }
-        if (!play)
-            ps3_hle_register_fast(0x718BF5F8u /* cellFsOpen */, port_cellFsOpen_skip_videos);
+        ps3_hle_register_fast(0x718BF5F8u /* cellFsOpen */, play ? port_cellFsOpen_videos : port_cellFsOpen_skip_videos);
+        /* The title looks for "<name>_60.avi" with cellFsStat before it opens it (and falls back to
+         * "<name>.avi", which no disc has, then waits for ever): a copy of the game without ui\video
+         * must answer for the re-encoded file there too. Same path swap (r3). */
+        if (play) ps3_hle_register_fast(0x7DE6DCEDu /* cellFsStat */, port_cellFsOpen_videos);
     }
     /* run.bat redirects stdout to a file: fully buffered, so whatever the HLE
      * printf'd last was lost when a run was killed, and the log looked like the
@@ -707,6 +763,7 @@ extern "C" void port_register_hle_overrides(void)
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     port_align_cellfs_mappings();
     port_psarc_patch_init();
+    port_movie_trace_init();
     ps3_hle_register_ctx(0xA2C7BA64u, "sys_prx_exitspawn_with_level",   sys_prx_exitspawn_with_level);
     ps3_hle_register_ctx(0xFAA275A4u, "cellVideoOutGetScreenSize",      cellVideoOutGetScreenSize);
     ps3_hle_register_ctx(0xA5D06BF0u, "sys_prx_get_module_list",        sys_prx_get_module_list);

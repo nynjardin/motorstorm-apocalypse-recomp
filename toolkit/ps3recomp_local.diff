@@ -11,1104 +11,268 @@ index b975293d..72208f94 100644
  };
  
  /* selectany (a COMDAT "any": one definition kept, every object sees the same
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index f231ea26..60750d8d 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -621,8 +621,57 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+      * With no device, pace on the performance counter instead. */
+     LARGE_INTEGER qf, q0; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
+     unsigned long long blocks = 0;
++    /* Local patch #74 (AUDIO_PACE=0 = off): one block every 5.33 ms on a steady clock, as the console does,
++     * instead of "as soon as the device has room". The device takes its data in periods of ~10 ms, so
++     * keyed on its room the loop consumed two blocks back to back, then nothing for 10 ms. A guest
++     * mixer that writes ONE block per notification, at the read index it sees (libmixer / SurMixer:
++     * MotorStorm: Apocalypse's movie sound), then filled every other block: half of the sound was
++     * silence (AUDIO_RATE: ~90 holes/s on its port). The device queue is kept around a target
++     * (2.5 blocks under full, so there is always room) by stretching or shrinking the period by
++     * 0.8 %: that follows the drift between the device clock and ours. */
++    static int s_pace = -1;
++    if (s_pace < 0) { const char* e = getenv("AUDIO_PACE"); s_pace = e ? atoi(e) : 1; }   /* 0 = keyed on the device room, as before */
++    long long pace_next = 0;
++    HANDLE pace_timer = s_pace ? CreateWaitableTimerExW(NULL, NULL, 0x00000002 /*HIGH_RESOLUTION*/, TIMER_ALL_ACCESS) : NULL;
+     while (s_mix_thread_running) {
+         const int room = audio_backend_room();
++#if AUDIO_BACKEND_WASAPI
++        if (s_pace && room >= 0) {
++            const long long per = qf.QuadPart * CELL_AUDIO_BLOCK_SAMPLES / CELL_AUDIO_SAMPLE_RATE;
++            const int buf = (int)s_wasapi_buf_frames;
++            const int target = buf > 5 * CELL_AUDIO_BLOCK_SAMPLES ? buf - (5 * CELL_AUDIO_BLOCK_SAMPLES) / 2 : buf / 2;
++            LARGE_INTEGER now; QueryPerformanceCounter(&now);
++            if (!pace_next) {
++                /* Start (or restart after a stall): silence up to the target, then the clock. */
++                memset(s_mix_buffer, 0, sizeof(s_mix_buffer));
++                for (int q = buf - room; q + CELL_AUDIO_BLOCK_SAMPLES <= target; q += CELL_AUDIO_BLOCK_SAMPLES)
++                    audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
++                pace_next = now.QuadPart;
++            }
++            if (now.QuadPart < pace_next) {
++                const long long left = pace_next - now.QuadPart;
++                if (pace_timer && left > qf.QuadPart / 5000) {
++                    LARGE_INTEGER due; due.QuadPart = -(left * 10000000 / qf.QuadPart);
++                    SetWaitableTimer(pace_timer, &due, 0, NULL, NULL, FALSE);
++                    WaitForSingleObject(pace_timer, 20);
++                } else if (left > qf.QuadPart / 500) Sleep(1);
++                else SwitchToThread();
++                continue;
++            }
++            if (room < CELL_AUDIO_BLOCK_SAMPLES) {      /* device full: its clock is behind ours */
++                audio_backend_wait(); QueryPerformanceCounter(&now); pace_next = now.QuadPart; continue;
++            }
++            if (now.QuadPart - pace_next > qf.QuadPart / 20) pace_next = 0;   /* 50 ms late: start again */
++            else {
++                const int queued = buf - room;
++                pace_next += per + (queued > target + CELL_AUDIO_BLOCK_SAMPLES / 2 ? per / 128
++                                    : queued < target - CELL_AUDIO_BLOCK_SAMPLES / 2 ? -(per / 128) : 0);
++            }
++            if (blocks > 64 && buf - room < CELL_AUDIO_BLOCK_SAMPLES / 2) g_audio_underruns++;
++            if (!pace_next) continue;
++            goto mix_block;
++        }
++#endif
+         if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
+ #if AUDIO_BACKEND_WASAPI
+         /* Device queue under half a block: it is about to play silence (an
+@@ -641,6 +690,9 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+                 q0.QuadPart = now.QuadPart -
+                     (long long)(blocks * CELL_AUDIO_BLOCK_SAMPLES * qf.QuadPart / CELL_AUDIO_SAMPLE_RATE);
+         }
++#if AUDIO_BACKEND_WASAPI
++mix_block:
++#endif
+         blocks++;
+         /* Mix and submit one block */
+         audio_mix_one_block();
 diff --git a/libs/codec/cellAdec.c b/libs/codec/cellAdec.c
-index c32d7676..1051a40a 100644
+index c32d7676..79c487e3 100644
 --- a/libs/codec/cellAdec.c
 +++ b/libs/codec/cellAdec.c
-@@ -1,546 +1,547 @@
--/*
-- * ps3recomp - cellAdec HLE implementation
-- *
-- * Audio decoder. Accepts AU data and delivers AUDONE + PCMOUT callbacks.
-- * AC3 decodes through FFmpeg loaded at run time (PS3RECOMP_FFMPEG_RUNTIME,
-- * ffmpeg_runtime.c, the loader cellVdec uses) into interleaved big-endian
-- * float PCM, one 1536-sample frame per AU in the stream's own channels.
-- * Every other codec, and AC3 when FFmpeg is absent or PS3RECOMP_FFMPEG=0,
-- * delivers silence of the codec's frame size.
-- */
--
--#include "cellAdec.h"
--#include <stdio.h>
--#include <stdlib.h>   /* getenv -- an implicit decl returns int, truncating the pointer */
--#include <string.h>
--#include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
--#include "../../runtime/ppu/ppu_context.h" /* g_active_ctx -> the guest lr */
--#include "../guest_struct.h"   /* GUEST_EA, guest_struct_load/store */
--#include "ps3emu/guest_call.h" /* g_ps3_guest_caller -- cbFunc is a GUEST OPD */
--#include "../../runtime/memory/vm.h"     /* VM_HLE_INJECT_BASE */
--#include "ps3emu/log_first.h"
--#include "ffmpeg_runtime.h"   /* PS3FFmpeg; empty without PS3RECOMP_FFMPEG_RUNTIME */
--
--/* CellAdecPcmItem as the guest reads it, from RPCS3 Modules/cellAdec.h:339.
-- * ps1_netemu copies the whole thing out with six 8-byte loads from offsets
-- * 0x00..0x28 (at 0x000ED964), and that copy is what confirms these offsets
-- * rather than a guess about padding: auInfo lands at 0x18, not 0x14, because it
-- * contains a u64. The block must be 0x30 readable GUEST bytes. */
--#define PCMITEM_PCM_HANDLE   0x00u
--#define PCMITEM_STATUS       0x04u
--#define PCMITEM_START_ADDR   0x08u
--#define PCMITEM_SIZE         0x0Cu
--#define PCMITEM_BSI_INFO     0x10u
--#define PCMITEM_AU_START     0x18u
--#define PCMITEM_AU_SIZE      0x1Cu
--#define PCMITEM_AU_PTS_HI    0x20u
--#define PCMITEM_AU_PTS_LO    0x24u
--#define PCMITEM_AU_USERDATA  0x28u
--#define PCMITEM_BYTES        0x30u
--
--/* PCM per AU, float (4 bytes a sample), interleaved.
-- *  - AC3: one A/52 frame is 1536 samples (6 blocks of 256) in the frame's own
-- *    channels (acmod + LFE from its header: 6 for a 5.1 track). A movie
-- *    player that sizes its ring as channels x 4 bytes a sample and takes each
-- *    AU's PCM size from bsiInfo+0x14 needs the block to be the real frame:
-- *    1024 stereo samples (8 KB) fed its 5.1 mixer a third of the audio an AU
-- *    stands for.
-- *  - the other codecs: 1024 stereo float samples of silence, the ATRAC3 frame
-- *    the first title on this stub (codecType 5) decodes. */
--#define ADEC_PCM_SAMPLES  1024u
--#define ADEC_PCM_BYTES    (ADEC_PCM_SAMPLES * 2u * 4u)
--#define ADEC_AC3_SAMPLES  1536u
--/* The largest block one AU produces here: an AC3 frame in 7.1. */
--#define ADEC_PCM_MAX_BYTES (ADEC_AC3_SAMPLES * 8u * 4u)
--
--/* Guest-visible scratch, in the HLE inject window rather than from the guest's
-- * own heap. Taking 8 KB out of that heap in cellAdecOpen stalled the title
-- * before it even reached cellAdecStartSeq -- ps1_netemu allocates its own
-- * buffers from the same bump allocator, and perturbing it is not worth it for
-- * two fixed-size blocks whose lifetime is the whole process.
-- *
-- * +0x40000 is clear of everything else in the window: labels +0x0000, control
-- * +0x2000, callback +0x2F00, the offset tables +0x3000/+0x5000, and sys_rsx's
-- * device/driver-info/reports pages at +0x30000/+0x31000/+0x38000. */
--#define ADEC_SCRATCH_BASE   (VM_HLE_INJECT_BASE + 0x40000u)
--#define ADEC_SCRATCH_STRIDE 0x4000u
--#define ADEC_ITEM_EA(h)     (ADEC_SCRATCH_BASE + (u32)(h) * ADEC_SCRATCH_STRIDE)
--/* The PCM block is up to 48 KB (ADEC_PCM_MAX_BYTES), more than the 16 KB
-- * stride holds, so it lives in its own 64 KB per handle at +0x80000..+0xC0000,
-- * past cellVdec's pic items at +0x50000. */
--#define ADEC_PCM_EA(h)      (VM_HLE_INJECT_BASE + 0x80000u + (u32)(h) * 0x10000u)
--/* The codec info block the PcmItem's bsiInfo points to, in the gap between
-- * the 0x30-byte item and the PCM buffer. */
--#define ADEC_BSI_EA(h)      (ADEC_ITEM_EA(h) + 0x40u)
--#define ADEC_BSI_BYTES      0x40u
--
--/* ---------------------------------------------------------------------------
-- * Internal state
-- * -----------------------------------------------------------------------*/
--#define MAX_ADEC 4
--
--typedef struct {
--    int in_use;
--    u32 codecType;
--    u32 cbFunc;         /* guest EA of the callback's OPD */
--    u32 cbArg;          /* guest EA handed back to it     */
--    int seqStarted;
--    u32 itemEa;         /* guest EA of the 0x30-byte CellAdecPcmItem */
--    u32 pcmEa;          /* guest EA of the PCM buffer it points at    */
--    int hasPcm;
--    u32 pcmBytes;       /* size of the PCM block at pcmEa */
--    u32 auCount;        /* total AUs decoded */
--    void* ff;           /* AdecFf: the libavcodec decoder, or NULL */
--    u8* au;             /* host copy of the AU being decoded */
--    u32 auCap;
--} AdecSlot;
--
--static AdecSlot s_adec[MAX_ADEC];
--
--/* ---------------------------------------------------------------------------
-- * AC3 frame header: the frame's channel count (A/52 5.4.2), for the size of
-- * the silent block when there is no decoder. 0 when it is not an AC3 frame.
-- * -----------------------------------------------------------------------*/
--static u32 adec_ac3_channels(const u8* f, u32 n)
--{
--    static const u8 nfchans[8] = { 2, 1, 2, 3, 3, 4, 4, 5 };
--    if (!f || n < 8 || f[0] != 0x0B || f[1] != 0x77) return 0;
--    if ((f[5] >> 3) > 10) return 0;          /* bsid > 10: E-AC3, not parsed */
--    u32 bits = ((u32)f[6] << 8) | f[7];      /* acmod(3) [cmixlev surmixlev dsurmod] lfeon */
--    u32 acmod = bits >> 13;
--    int pos = 3;
--    if ((acmod & 1u) && acmod != 1u) pos += 2;   /* cmixlev */
--    if (acmod & 4u) pos += 2;                    /* surmixlev */
--    if (acmod == 2u) pos += 2;                   /* dsurmod */
--    return nfchans[acmod] + ((bits >> (15 - pos)) & 1u);
--}
--
--/* ---------------------------------------------------------------------------
-- * libavcodec back end (AC3)
-- * -----------------------------------------------------------------------*/
--#ifdef PS3RECOMP_FFMPEG_RUNTIME
--
--typedef struct AdecFf {
--    const PS3FFmpeg* ff;
--    AVCodecContext* ctx;
--    AVPacket* pkt;
--    AVFrame* frame;
--    u8* buf;            /* the AU plus FFmpeg's zeroed input padding */
--    u32 bufCap;
--    u32* pcm;           /* big-endian float words, ADEC_PCM_MAX_BYTES */
--} AdecFf;
--
--static void adec_ff_close(void* p)
--{
--    AdecFf* d = (AdecFf*)p;
--    if (!d) return;
--    if (d->ctx) d->ff->avcodec_free_context(&d->ctx);
--    if (d->pkt) d->ff->av_packet_free(&d->pkt);
--    if (d->frame) d->ff->av_frame_free(&d->frame);
--    free(d->buf);
--    free(d->pcm);
--    free(d);
--}
--
--static void* adec_ff_open(u32 codec_type)
--{
--    if (codec_type != CELL_ADEC_TYPE_AC3) return NULL;
--    const PS3FFmpeg* ff = ps3_ffmpeg_get();
--    if (!ff) return NULL;
--    const AVCodec* codec = ff->avcodec_find_decoder(AV_CODEC_ID_AC3);
--    if (!codec) {
--        printf("[cellAdec] libavcodec has no AC3 decoder; silence\n");
--        return NULL;
--    }
--    AdecFf* d = (AdecFf*)calloc(1, sizeof(*d));
--    if (!d) return NULL;
--    d->ff = ff;
--    d->ctx = ff->avcodec_alloc_context3(codec);
--    d->pkt = ff->av_packet_alloc();
--    d->frame = ff->av_frame_alloc();
--    d->pcm = (u32*)malloc(ADEC_PCM_MAX_BYTES);
--    if (!d->ctx || !d->pkt || !d->frame || !d->pcm ||
--        ff->avcodec_open2(d->ctx, codec, NULL) < 0) {
--        printf("[cellAdec] could not open the libavcodec AC3 decoder; silence\n");
--        adec_ff_close(d);
--        return NULL;
--    }
--    return d;
--}
--
--static void adec_ff_flush(void* p)
--{
--    AdecFf* d = (AdecFf*)p;
--    if (d) d->ff->avcodec_flush_buffers(d->ctx);
--}
--
--static float adec_ff_sample(const AVFrame* f, int ch, int c, int s)
--{
--    const u8* const* x = (const u8* const*)f->extended_data;
--    switch (f->format) {
--    case AV_SAMPLE_FMT_FLTP: return ((const float*)x[c])[s];
--    case AV_SAMPLE_FMT_FLT:  return ((const float*)x[0])[s * ch + c];
--    case AV_SAMPLE_FMT_S16P: return ((const int16_t*)x[c])[s] * (1.0f / 32768.0f);
--    case AV_SAMPLE_FMT_S16:  return ((const int16_t*)x[0])[s * ch + c] * (1.0f / 32768.0f);
--    case AV_SAMPLE_FMT_S32P: return (float)((const int32_t*)x[c])[s] * (1.0f / 2147483648.0f);
--    case AV_SAMPLE_FMT_S32:  return (float)((const int32_t*)x[0])[s * ch + c] * (1.0f / 2147483648.0f);
--    default:                 return 0.0f;
--    }
--}
--
--/* Decode one AU and store its PCM at guest dst as interleaved big-endian
-- * float, frame after frame. Returns the bytes stored (0: nothing came out);
+@@ -93,6 +93,12 @@ typedef struct {
+     void* ff;           /* AdecFf: the libavcodec decoder, or NULL */
+     u8* au;             /* host copy of the AU being decoded */
+     u32 auCap;
++    /* AC3 output asked by cellAdecStartSeq (CellAdecParamAc3), 0 channels = the stream's own:
++     * the channel count, which decoder channel goes to each output position (A/52 order:
++     * 0 L, 1 C, 2 R, 3 Ls, 4 Rs, 5 LFE) and the PCM scale. */
++    u32 outCh;
++    u8  outMap[8];
++    float outScale;
+ } AdecSlot;
+ 
+ static AdecSlot s_adec[MAX_ADEC];
+@@ -188,10 +194,50 @@ static float adec_ff_sample(const AVFrame* f, int ch, int c, int s)
+     }
+ }
+ 
++/* Which A/52 channel (0 L, 1 C, 2 R, 3 Ls, 4 Rs, 5 LFE) each channel of a decoded frame is, from
++ * libavcodec's layout (it hands the channels out in its own order: FL FR FC LFE BL BR for 5.1).
++ * src[k] = index of the frame channel that carries A/52 channel k, -1 = the stream has none.
++ * A single surround channel (BC) feeds both Ls and Rs. */
++static void adec_ff_a52_sources(const AVFrame* f, int ch, int src[6])
++{
++    for (int k = 0; k < 6; k++) src[k] = -1;
++    if (f->ch_layout.order == AV_CHANNEL_ORDER_NATIVE && f->ch_layout.u.mask) {
++        int idx = 0;
++        for (int bit = 0; bit < 64 && idx < ch; bit++) {
++            if (!(f->ch_layout.u.mask >> bit & 1u)) continue;
++            switch (bit) {
++            case AV_CHAN_FRONT_LEFT:    src[0] = idx; break;
++            case AV_CHAN_FRONT_CENTER:  src[1] = idx; break;
++            case AV_CHAN_FRONT_RIGHT:   src[2] = idx; break;
++            case AV_CHAN_SIDE_LEFT:
++            case AV_CHAN_BACK_LEFT:     src[3] = idx; break;
++            case AV_CHAN_SIDE_RIGHT:
++            case AV_CHAN_BACK_RIGHT:    src[4] = idx; break;
++            case AV_CHAN_BACK_CENTER:   src[3] = idx; src[4] = idx; break;
++            case AV_CHAN_LOW_FREQUENCY: src[5] = idx; break;
++            default: break;
++            }
++            idx++;
++        }
++        return;
++    }
++    /* No layout: the usual orders by count. */
++    if (ch == 1) src[1] = 0;
++    else if (ch >= 2) {
++        src[0] = 0; src[2] = 1;
++        if (ch >= 6) { src[1] = 2; src[5] = 3; src[3] = 4; src[4] = 5; }
++    }
++}
++
+ /* Decode one AU and store its PCM at guest dst as interleaved big-endian
+  * float, frame after frame. Returns the bytes stored (0: nothing came out);
 - * *channels gets the last frame's channel count. */
 -static u32 adec_ff_decode(void* p, const u8* au, u32 size, u32 dst, u32* channels)
--{
--    AdecFf* d = (AdecFf*)p;
--    const PS3FFmpeg* ff = d->ff;
--    if (size + AV_INPUT_BUFFER_PADDING_SIZE > d->bufCap) {
--        u8* nb = (u8*)realloc(d->buf, size + AV_INPUT_BUFFER_PADDING_SIZE);
--        if (!nb) return 0;
--        d->buf = nb;
--        d->bufCap = size + AV_INPUT_BUFFER_PADDING_SIZE;
--    }
--    memcpy(d->buf, au, size);
--    memset(d->buf + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
--    d->pkt->data = d->buf;
--    d->pkt->size = (int)size;
--    int r = ff->avcodec_send_packet(d->ctx, d->pkt);
--    d->pkt->data = NULL;
--    d->pkt->size = 0;
--    u32 out = 0;
--    if (r < 0) {
--        static int _n = 0;
--        if (PS3_LOG_FIRST(_n, 8))
--            printf("[cellAdec] AC3 AU of %u bytes did not decode (%d)\n", size, r);
--    }
--    for (;;) {
--        AVFrame* f = d->frame;
--        if (ff->avcodec_receive_frame(d->ctx, f) < 0)
--            break;                                  /* EAGAIN / EOF / error */
--        int ch = f->ch_layout.nb_channels, ns = f->nb_samples;
++ * *channels gets the last frame's channel count.
++ * out_ch != 0: the title asked for that many channels (cellAdecStartSeq), output position i
++ * carrying A/52 channel out_map[i]; channels the stream does not have are silent. A title that
++ * asks for six and gets the stream's two reads the block as a third of the samples
++ * (MotorStorm: Apocalypse's movies: 512 of each 1536 samples played, the rest silence). */
++static u32 adec_ff_decode(void* p, const u8* au, u32 size, u32 dst, u32* channels,
++                          u32 out_ch, const u8* out_map, float out_scale)
+ {
+     AdecFf* d = (AdecFf*)p;
+     const PS3FFmpeg* ff = d->ff;
+@@ -219,7 +265,8 @@ static u32 adec_ff_decode(void* p, const u8* au, u32 size, u32 dst, u32* channel
+         if (ff->avcodec_receive_frame(d->ctx, f) < 0)
+             break;                                  /* EAGAIN / EOF / error */
+         int ch = f->ch_layout.nb_channels, ns = f->nb_samples;
 -        u32 bytes = (u32)ns * (u32)ch * 4u;
--        if (ch < 1 || ch > 8 || ns <= 0 || out + bytes > ADEC_PCM_MAX_BYTES) {
--            static int _n = 0;
--            if (PS3_LOG_FIRST(_n, 4))
--                printf("[cellAdec] dropping a decoded frame (%d samples x %d ch, %u bytes held)\n",
--                       ns, ch, out);
--            ff->av_frame_unref(f);
--            continue;
--        }
--        u32 i = 0;
--        for (int s = 0; s < ns; s++)
--            for (int c = 0; c < ch; c++) {
--                float v = adec_ff_sample(f, ch, c, s);
--                u32 w;
--                memcpy(&w, &v, 4);
--                d->pcm[i++] = (w >> 24) | ((w >> 8) & 0xFF00u) | ((w << 8) & 0xFF0000u) | (w << 24);
--            }
--        vm_memcpy_to(dst + out, d->pcm, bytes);
--        { static int _n = 0;
--          if (PS3_LOG_FIRST(_n, 1))
++        const int och = out_ch ? (int)out_ch : ch;
++        u32 bytes = (u32)ns * (u32)och * 4u;
+         if (ch < 1 || ch > 8 || ns <= 0 || out + bytes > ADEC_PCM_MAX_BYTES) {
+             static int _n = 0;
+             if (PS3_LOG_FIRST(_n, 4))
+@@ -229,6 +276,18 @@ static u32 adec_ff_decode(void* p, const u8* au, u32 size, u32 dst, u32* channel
+             continue;
+         }
+         u32 i = 0;
++        if (out_ch) {
++            int src[6], pos[8];
++            adec_ff_a52_sources(f, ch, src);
++            for (int c = 0; c < och; c++) pos[c] = (out_map && out_map[c] < 6) ? src[out_map[c]] : -1;
++            for (int s = 0; s < ns; s++)
++                for (int c = 0; c < och; c++) {
++                    float v = pos[c] >= 0 ? adec_ff_sample(f, ch, pos[c], s) * out_scale : 0.0f;
++                    u32 w;
++                    memcpy(&w, &v, 4);
++                    d->pcm[i++] = (w >> 24) | ((w >> 8) & 0xFF00u) | ((w << 8) & 0xFF0000u) | (w << 24);
++                }
++        } else
+         for (int s = 0; s < ns; s++)
+             for (int c = 0; c < ch; c++) {
+                 float v = adec_ff_sample(f, ch, c, s);
+@@ -239,10 +298,10 @@ static u32 adec_ff_decode(void* p, const u8* au, u32 size, u32 dst, u32* channel
+         vm_memcpy_to(dst + out, d->pcm, bytes);
+         { static int _n = 0;
+           if (PS3_LOG_FIRST(_n, 1))
 -              printf("[cellAdec] AC3 through libavcodec: %d samples x %d ch at %d Hz, %u bytes an AU\n",
 -                     ns, ch, f->sample_rate, bytes); }
--        out += bytes;
++              printf("[cellAdec] AC3 through libavcodec: %d samples x %d ch at %d Hz, given as %d ch, %u bytes an AU\n",
++                     ns, ch, f->sample_rate, och, bytes); }
+         out += bytes;
 -        *channels = (u32)ch;
--        ff->av_frame_unref(f);
--    }
--    return out;
--}
--
--#else /* !PS3RECOMP_FFMPEG_RUNTIME */
--
--static void* adec_ff_open(u32 codec_type) { (void)codec_type; return NULL; }
--static void  adec_ff_close(void* p) { (void)p; }
--static void  adec_ff_flush(void* p) { (void)p; }
++        *channels = (u32)och;
+         ff->av_frame_unref(f);
+     }
+     return out;
+@@ -253,8 +312,9 @@ static u32 adec_ff_decode(void* p, const u8* au, u32 size, u32 dst, u32* channel
+ static void* adec_ff_open(u32 codec_type) { (void)codec_type; return NULL; }
+ static void  adec_ff_close(void* p) { (void)p; }
+ static void  adec_ff_flush(void* p) { (void)p; }
 -static u32   adec_ff_decode(void* p, const u8* au, u32 size, u32 dst, u32* channels)
 -{ (void)p; (void)au; (void)size; (void)dst; (void)channels; return 0; }
--
--#endif /* PS3RECOMP_FFMPEG_RUNTIME */
--
--/* Fire one guest callback.
-- *
-- * The guest's cbFunc is a guest EA naming an OPD, so it goes through the
-- * recompiled code's dispatcher. It used to be cast to a host function pointer
-- * and called directly, which jumped to the guest address as host code:
-- *
-- *     [CRASH] code=0xC0000005 rip=00000000001B5F00
-- *     [CRASH] last HLE NID (cellAdecDecodeAu)
-- *
-- * 0x1B5F00 is the guest OPD. That crash is what this function exists to stop.
-- *
-- * ponytail: dispatched SYNCHRONOUSLY on the caller's thread rather than from a
-- * decoder thread as lv2 does. The ceiling is a guest callback that blocks
-- * waiting on the thread that called DecodeAu -- give this its own thread if a
-- * title ever deadlocks here. */
--static void adec_notify(CellAdecHandle handle, u32 msg_type, s32 msg_data)
--{
--    if (handle >= MAX_ADEC || !s_adec[handle].in_use) return;
--    const AdecSlot* a = &s_adec[handle];
--    { static int _n = 0;
--      if (PS3_LOG_FIRST(_n, 4))
--          printf("[cellAdec] notify h=%u msg=%u data=0x%X cb=0x%08X arg=0x%08X caller=%d\n",
--                 handle, msg_type, (unsigned)msg_data, a->cbFunc, a->cbArg,
--                 g_ps3_guest_caller ? 1 : 0); }
--    if (!a->cbFunc || !g_ps3_guest_caller) return;
--    g_ps3_guest_caller(a->cbFunc, (u64)handle, (u64)msg_type,
--                       (u64)(s64)msg_data, (u64)a->cbArg, 0, 0, 0, 0);
--}
--
--/* ---------------------------------------------------------------------------
-- * API implementations
-- * -----------------------------------------------------------------------*/
--
--/* cellAdecQueryAttr: how much work memory the decoder wants, before Open.
-- * CellAdecAttr (guest, big-endian): +0 u32 workMemSize, +4 u32 adecVerUpper,
-- * +8 u32 adecVerLower. Decoding is host-side and never touches the buffer;
-- * see cellVdecQueryAttr. */
--s32 cellAdecQueryAttr(const CellAdecType* type, void* attr)
--{
--    u32 ea = (u32)(uintptr_t)attr;
--    if (!type || !ea)
--        return (s32)CELL_ADEC_ERROR_ARG;
--    vm_write32(ea + 0x0, 0x40000);    /* workMemSize: 256 KB */
--    vm_write32(ea + 0x4, 0x00010000); /* adecVerUpper */
--    vm_write32(ea + 0x8, 0);          /* adecVerLower */
--    return CELL_OK;
--}
--
--/* cellAdecOpen(type, res, cb, handle) -- FOUR arguments.
-- *
-- * This took five, splitting the guest's CellAdecCb struct into cbFunc + cbArg,
-- * which pushed `handle` off r6 onto r7. r7 held whatever happened to be there, so
-- * the null check failed and every Open returned CELL_ADEC_ERROR_ARG. ps1_netemu
-- * opens a decoder for CD-DA/XA audio inside its CD-ROM constructor and gives up on
-- * the error -- so the disc was never mounted and the emulator sat in its run loop
-- * with nothing to run. Signature confirmed against RPCS3 (Modules/cellAdec.cpp).
-- *
-- * cb is a guest pointer to { u32 cbFunc; u32 cbArg; }. */
--s32 cellAdecOpen(const CellAdecType* type, const CellAdecResource* res,
--                 const CellAdecCb* cb, CellAdecHandle* handle)
--{
--    (void)res;
--
--    u32 codec_type = type ? vm_read32(GUEST_EA(type)) : 0;   /* audioCodecType */
--    u32 cb_ea      = (u32)(uintptr_t)cb;
--    u32 handle_ea  = (u32)(uintptr_t)handle;
--    printf("[cellAdec] Open(codecType=%u, cb=0x%08X, handle=0x%08X)\n",
--           codec_type, cb_ea, handle_ea);
--
--    if (!type || !handle_ea)
--        return (s32)CELL_ADEC_ERROR_ARG;
--
--    for (int i = 0; i < MAX_ADEC; i++) {
--        if (!s_adec[i].in_use) {
--            memset(&s_adec[i], 0, sizeof(AdecSlot));
--            s_adec[i].in_use    = 1;
--            s_adec[i].codecType = codec_type;
--            if (cb_ea) {
--                s_adec[i].cbFunc = vm_read32(cb_ea + 0);
--                s_adec[i].cbArg  = vm_read32(cb_ea + 4);
--            }
--            /* The PcmItem is handed to the guest BY POINTER, so it cannot live
--             * in host memory -- returning &host_struct is what crashed here
--             * once already. */
--            s_adec[i].itemEa = ADEC_ITEM_EA(i);
--            s_adec[i].pcmEa  = ADEC_PCM_EA(i);
--            s_adec[i].ff     = adec_ff_open(codec_type);
--            vm_write32(handle_ea, (u32)i);
--            printf("[cellAdec] Open -> handle=%u item=0x%08X pcm=0x%08X%s\n",
--                   i, s_adec[i].itemEa, s_adec[i].pcmEa,
--                   s_adec[i].ff ? " (decoding with libavcodec)" : "");
--            return CELL_OK;
--        }
--    }
--    return (s32)CELL_ADEC_ERROR_BUSY;
--}
--
--s32 cellAdecClose(CellAdecHandle handle)
--{
--    printf("[cellAdec] Close(handle=%u)\n", handle);
--
--    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
--        return (s32)CELL_ADEC_ERROR_ARG;
--
--    adec_ff_close(s_adec[handle].ff);
--    free(s_adec[handle].au);
--    s_adec[handle].ff = NULL;
--    s_adec[handle].au = NULL;
--    s_adec[handle].auCap = 0;
--    s_adec[handle].in_use = 0;
--    return CELL_OK;
--}
--
--s32 cellAdecStartSeq(CellAdecHandle handle, void* param)
--{
++static u32   adec_ff_decode(void* p, const u8* au, u32 size, u32 dst, u32* channels,
++                            u32 out_ch, const u8* out_map, float out_scale)
++{ (void)p; (void)au; (void)size; (void)dst; (void)channels; (void)out_ch; (void)out_map; (void)out_scale; return 0; }
+ 
+ #endif /* PS3RECOMP_FFMPEG_RUNTIME */
+ 
+@@ -287,6 +347,7 @@ static void adec_notify(CellAdecHandle handle, u32 msg_type, s32 msg_data)
+                        (u64)(s64)msg_data, (u64)a->cbArg, 0, 0, 0, 0);
+ }
+ 
++
+ /* ---------------------------------------------------------------------------
+  * API implementations
+  * -----------------------------------------------------------------------*/
+@@ -373,8 +434,41 @@ s32 cellAdecClose(CellAdecHandle handle)
+ 
+ s32 cellAdecStartSeq(CellAdecHandle handle, void* param)
+ {
 -    (void)param;
--    printf("[cellAdec] StartSeq(handle=%u)\n", handle);
--
--    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
--        return (s32)CELL_ADEC_ERROR_ARG;
--
--    s_adec[handle].seqStarted = 1;
--    adec_ff_flush(s_adec[handle].ff);   /* a new sequence starts clean */
--    return CELL_OK;
--}
--
--s32 cellAdecEndSeq(CellAdecHandle handle)
--{
--    /* ADEC_WHO=1: name the guest function driving this. The title calls EndSeq
--     * hundreds of times against a single StartSeq, and the image has eight
--     * EndSeq call sites -- the backtrace says which one. */
--    { static int _n = -1;
--      if (_n < 0) _n = getenv("ADEC_WHO") ? 0 : -2;
--      if (_n >= 0 && _n < 8) { _n++;
--          /* The guest lr, not a host backtrace. ppu_guest_caller maps host
--           * frames to the nearest lifted function, and here it landed on
--           * func_00013040 -- a single `blr`, so plainly a mis-attribution.
--           * lr is written by the `bl` to the import stub, so it is exactly
--           * (call site + 4) for a call like this one. */
--          extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
--          printf("[cellAdec] EndSeq from guest lr=0x%08X tid=%llu\n",
--                 g_active_ctx ? (u32)g_active_ctx->lr : 0u,
--                 g_active_ctx ? (unsigned long long)g_active_ctx->thread_id : 0ull); } }
--    printf("[cellAdec] EndSeq(handle=%u)\n", handle);
--
--    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
--        return (s32)CELL_ADEC_ERROR_ARG;
--
--    s_adec[handle].seqStarted = 0;
--
--    adec_notify(handle, CELL_ADEC_MSG_TYPE_SEQDONE, CELL_OK);
--
--    return CELL_OK;
--}
--
--s32 cellAdecDecodeAu(CellAdecHandle handle, const CellAdecAuInfo* auInfo)
--{
--    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
--        return (s32)CELL_ADEC_ERROR_ARG;
--    if (!auInfo)
--        return (s32)CELL_ADEC_ERROR_ARG;
--
--    AdecSlot* a = &s_adec[handle];
--    const u32 au = GUEST_EA(auInfo);
--    const u32 au_addr = vm_read32(au + (u32)offsetof(CellAdecAuInfo, startAddr));
--    const u32 au_size = vm_read32(au + (u32)offsetof(CellAdecAuInfo, size));
--    /* The AU info, read before AUDONE gives it back to the title. */
--    const u32 au_w[4] = { vm_read32(au + 0x08), vm_read32(au + 0x0C),
--                          vm_read32(au + 0x10), vm_read32(au + 0x14) };
--
--    printf("[cellAdec] DecodeAu(handle=%u, addr=0x%X, size=%u)\n",
--           handle, au_addr, au_size);
--
--    /* The AC3 bytes are copied out first, too: AUDONE hands their buffer back
--     * to the title's demuxer, which may refill it at once. */
--    const u8* data = NULL;
--    if (a->codecType == CELL_ADEC_TYPE_AC3 && au_addr && au_size && au_size <= 0x10000u) {
--        if (au_size > a->auCap) {
--            u8* nb = (u8*)realloc(a->au, au_size);
--            if (nb) { a->au = nb; a->auCap = au_size; }
--        }
--        if (au_size <= a->auCap) {
--            vm_memcpy_from(a->au, au_addr, au_size);
--            data = a->au;
--        }
--    }
--
--    /* Step 1: report the AU consumed. msgData is the AU INFO ADDRESS, not a
--     * status -- see RPCS3 Modules/cellAdec.cpp:1345. A decoder that tracks its
--     * outstanding AUs by address gets a null back if this is CELL_OK. */
--    adec_notify(handle, CELL_ADEC_MSG_TYPE_AUDONE, (s32)au);
--
--    /* Step 2: the PCM. AC3 through libavcodec when it is there; otherwise
--     * silence of the codec's frame size (AC3: 1536 samples in the frame's
--     * channels), so a title that counts PCM against time still runs. */
--    a->auCount++;
--    {
--        const u32 it = a->itemEa;
--        u32 ch = 0;
+     printf("[cellAdec] StartSeq(handle=%u)\n", handle);
++    /* The codec parameters the title asks for (CellAdecParamAc3: wordSize, outputMode, outLfeOn,
++     * drcCutScaleFactor, drcBoostScaleFactor, compressionMode, numberOfChannels, stereoMode,
++     * dualMonoMode, pcmScaleFactor, channelPointer0..5). */
++    { const u32 p = GUEST_EA(param);
++      if (p) {
++          printf("[cellAdec] StartSeq param @0x%08X:", p);
++          for (u32 o = 0; o < 0x40; o += 4) printf(" %08X", vm_read32(p + o));
++          printf("\n");
++      }
++      /* CellAdecParamAc3 (big-endian): +0x00 u8 wordSize (1 = float), +0x01 u8 outputMode (acmod),
++       * +0x02 u8 outLfeOn, +0x04 float drcCut, +0x08 float drcBoost, +0x0C u8 compressionMode,
++       * +0x0D u8 numberOfChannels, +0x0E u8 stereoMode, +0x0F u8 dualMonoMode, +0x10 u8
++       * karaokeCapableMode, +0x14 float pcmScaleFactor, +0x18 s32 channelPointer0..5.
++       * The decoder gives numberOfChannels channels in the channelPointer order, whatever the
++       * stream holds. ADEC_AC3_NATIVE=1 = the stream's own channels, as before. */
++      AdecSlot* a = &s_adec[handle < MAX_ADEC ? handle : 0];
++      if (handle < MAX_ADEC && a->in_use) {
++          a->outCh = 0;
++          if (p && a->codecType == CELL_ADEC_TYPE_AC3 && !getenv("ADEC_AC3_NATIVE")) {
++              const u32 n = vm_read8(p + 0x0D);
++              if (n >= 1 && n <= 6) {
++                  a->outCh = n;
++                  for (u32 i = 0; i < 8; i++) {
++                      const u32 cp = i < 6 ? vm_read32(p + 0x18 + 4 * i) : i;
++                      a->outMap[i] = (u8)(cp < 6 ? cp : i);
++                  }
++                  u32 w = vm_read32(p + 0x14); float sc; memcpy(&sc, &w, 4);
++                  a->outScale = (sc > 0.0f && sc <= 16.0f) ? sc : 1.0f;
++                  printf("[cellAdec] AC3 output: %u channels, order %u %u %u %u %u %u, scale %.3f\n", n,
++                         a->outMap[0], a->outMap[1], a->outMap[2], a->outMap[3], a->outMap[4], a->outMap[5],
++                         (double)a->outScale);
++              }
++          }
++      } }
+ 
+     if (handle >= MAX_ADEC || !s_adec[handle].in_use)
+         return (s32)CELL_ADEC_ERROR_ARG;
+@@ -457,10 +551,11 @@ s32 cellAdecDecodeAu(CellAdecHandle handle, const CellAdecAuInfo* auInfo)
+     {
+         const u32 it = a->itemEa;
+         u32 ch = 0;
 -        u32 bytes = (a->ff && data) ? adec_ff_decode(a->ff, data, au_size, a->pcmEa, &ch) : 0;
--        if (bytes == 0) {
--            if (a->codecType == CELL_ADEC_TYPE_AC3) {
++        u32 bytes = (a->ff && data) ? adec_ff_decode(a->ff, data, au_size, a->pcmEa, &ch,
++                                                     a->outCh, a->outMap, a->outScale) : 0;
+         if (bytes == 0) {
+             if (a->codecType == CELL_ADEC_TYPE_AC3) {
 -                ch = adec_ac3_channels(data, data ? au_size : 0);
--                bytes = ADEC_AC3_SAMPLES * (ch ? ch : 2u) * 4u;
--            } else {
--                bytes = ADEC_PCM_BYTES;
--            }
--            vm_memset(a->pcmEa, 0, bytes);
--        }
--        a->pcmBytes = bytes;
--
--        vm_write32(it + PCMITEM_PCM_HANDLE, (u32)handle);
--        vm_write32(it + PCMITEM_STATUS,     0);              /* CELL_OK */
--        vm_write32(it + PCMITEM_START_ADDR, a->pcmEa);
--        vm_write32(it + PCMITEM_SIZE,       bytes);
--        /* bsiInfo must point at a codec info block, not be null. Resistance:
--         * Fall of Man sizes each AC3 block from bsiInfo+0x14; with a null
--         * pointer that read address 0x14 and came back 0, so its ring buffer
--         * never filled, it never started its audio port, and its movie player
--         * waited forever. Other titles' PCMOUT handlers take the AU's
--         * PCM size from the same word. ponytail: only that output-size word is
--         * filled; the rest of the block is zero until a title reads another
--         * field. */
--        const u32 bsi = ADEC_BSI_EA(handle);
--        for (u32 o = 0; o < ADEC_BSI_BYTES; o += 4) vm_write32(bsi + o, 0);
--        vm_write32(bsi + 0x14, bytes);
--        vm_write32(it + PCMITEM_BSI_INFO,   bsi);
--        /* Echo the AU back, which is what a real decoder does -- the guest
--         * matches returned PCM against the AU it submitted. */
--        vm_write32(it + PCMITEM_AU_START,        au_addr);
--        vm_write32(it + PCMITEM_AU_SIZE,         au_size);
--        vm_write32(it + PCMITEM_AU_PTS_HI,       au_w[0]);
--        vm_write32(it + PCMITEM_AU_PTS_LO,       au_w[1]);
--        vm_write32(it + PCMITEM_AU_USERDATA,     au_w[2]);
--        vm_write32(it + PCMITEM_AU_USERDATA + 4, au_w[3]);
--    }
--    a->hasPcm = 1;
--
--    adec_notify(handle, CELL_ADEC_MSG_TYPE_PCMOUT, CELL_OK);
--
--    return CELL_OK;
--}
--
--s32 cellAdecGetPcm(CellAdecHandle handle, void* outBuffer)
--{
--    { static int _n = 0; if (PS3_LOG_FIRST(_n, 6))
--        printf("[cellAdec] GetPcm(handle=%u out=0x%08X)\n",
--               handle, GUEST_EA(outBuffer)); }
--    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
--        return (s32)CELL_ADEC_ERROR_ARG;
--
--    if (!s_adec[handle].hasPcm)
--        return (s32)CELL_ADEC_ERROR_EMPTY;
--
--    /* outBuffer is the GUEST's buffer: the AU's PCM block goes there, the
--     * size the item and bsiInfo+0x14 announced. Leaving it untouched hands the
--     * title whatever happened to be there, which it then plays. */
--    { const u32 out = GUEST_EA(outBuffer);
--      const AdecSlot* a = &s_adec[handle];
--      if (out && a->pcmBytes)
--          vm_memcpy_to(out, vm_ptr8(a->pcmEa), a->pcmBytes); }
--
--    s_adec[handle].hasPcm = 0;
--    return CELL_OK;
--}
--
--s32 cellAdecGetPcmItem(CellAdecHandle handle, const CellAdecPcmItem** pcmItem)
--{
--    { static int _n = 0; if (PS3_LOG_FIRST(_n, 6))
--        printf("[cellAdec] GetPcmItem(handle=%u out=0x%08X hasPcm=%d)\n",
--               handle, GUEST_EA(pcmItem),
--               handle < MAX_ADEC ? s_adec[handle].hasPcm : -1); }
--    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
--        return (s32)CELL_ADEC_ERROR_ARG;
--
--    if (!s_adec[handle].hasPcm)
--        return (s32)CELL_ADEC_ERROR_EMPTY;
--
--    /* pcmItem is a GUEST CellAdecPcmItem**. Writing &host_struct here put a
--     * HOST address into guest memory; the guest dereferenced it and died on a
--     * wild address (rip 0x870D0E, fault 0xCFFDFFF0). Write the guest EA. */
--    if (pcmItem)
--        vm_write32(GUEST_EA(pcmItem), s_adec[handle].itemEa);
--
--    return CELL_OK;
--}
-+/*
-+ * ps3recomp - cellAdec HLE implementation
-+ *
-+ * Audio decoder. Accepts AU data and delivers AUDONE + PCMOUT callbacks.
-+ * AC3 decodes through FFmpeg loaded at run time (PS3RECOMP_FFMPEG_RUNTIME,
-+ * ffmpeg_runtime.c, the loader cellVdec uses) into interleaved big-endian
-+ * float PCM, one 1536-sample frame per AU in the stream's own channels.
-+ * Every other codec, and AC3 when FFmpeg is absent or PS3RECOMP_FFMPEG=0,
-+ * delivers silence of the codec's frame size.
-+ */
-+
-+#include "cellAdec.h"
-+#include <stdio.h>
-+#include <stdlib.h>   /* getenv -- an implicit decl returns int, truncating the pointer */
-+#include <string.h>
-+#include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
-+#include "../../runtime/ppu/ppu_context.h" /* g_active_ctx -> the guest lr */
-+#include "../guest_struct.h"   /* GUEST_EA, guest_struct_load/store */
-+#include "ps3emu/guest_call.h" /* g_ps3_guest_caller -- cbFunc is a GUEST OPD */
-+#include "../../runtime/memory/vm.h"     /* VM_HLE_INJECT_BASE */
-+#include "ps3emu/log_first.h"
-+#include "ffmpeg_runtime.h"   /* PS3FFmpeg; empty without PS3RECOMP_FFMPEG_RUNTIME */
-+
-+/* CellAdecPcmItem as the guest reads it, from RPCS3 Modules/cellAdec.h:339.
-+ * ps1_netemu copies the whole thing out with six 8-byte loads from offsets
-+ * 0x00..0x28 (at 0x000ED964), and that copy is what confirms these offsets
-+ * rather than a guess about padding: auInfo lands at 0x18, not 0x14, because it
-+ * contains a u64. The block must be 0x30 readable GUEST bytes. */
-+#define PCMITEM_PCM_HANDLE   0x00u
-+#define PCMITEM_STATUS       0x04u
-+#define PCMITEM_START_ADDR   0x08u
-+#define PCMITEM_SIZE         0x0Cu
-+#define PCMITEM_BSI_INFO     0x10u
-+#define PCMITEM_AU_START     0x18u
-+#define PCMITEM_AU_SIZE      0x1Cu
-+#define PCMITEM_AU_PTS_HI    0x20u
-+#define PCMITEM_AU_PTS_LO    0x24u
-+#define PCMITEM_AU_USERDATA  0x28u
-+#define PCMITEM_BYTES        0x30u
-+
-+/* PCM per AU, float (4 bytes a sample), interleaved.
-+ *  - AC3: one A/52 frame is 1536 samples (6 blocks of 256) in the frame's own
-+ *    channels (acmod + LFE from its header: 6 for a 5.1 track). A movie
-+ *    player that sizes its ring as channels x 4 bytes a sample and takes each
-+ *    AU's PCM size from bsiInfo+0x14 needs the block to be the real frame:
-+ *    1024 stereo samples (8 KB) fed its 5.1 mixer a third of the audio an AU
-+ *    stands for.
-+ *  - the other codecs: 1024 stereo float samples of silence, the ATRAC3 frame
-+ *    the first title on this stub (codecType 5) decodes. */
-+#define ADEC_PCM_SAMPLES  1024u
-+#define ADEC_PCM_BYTES    (ADEC_PCM_SAMPLES * 2u * 4u)
-+#define ADEC_AC3_SAMPLES  1536u
-+/* The largest block one AU produces here: an AC3 frame in 7.1. */
-+#define ADEC_PCM_MAX_BYTES (ADEC_AC3_SAMPLES * 8u * 4u)
-+
-+/* Guest-visible scratch, in the HLE inject window rather than from the guest's
-+ * own heap. Taking 8 KB out of that heap in cellAdecOpen stalled the title
-+ * before it even reached cellAdecStartSeq -- ps1_netemu allocates its own
-+ * buffers from the same bump allocator, and perturbing it is not worth it for
-+ * two fixed-size blocks whose lifetime is the whole process.
-+ *
-+ * +0x40000 is clear of everything else in the window: labels +0x0000, control
-+ * +0x2000, callback +0x2F00, the offset tables +0x3000/+0x5000, and sys_rsx's
-+ * device/driver-info/reports pages at +0x30000/+0x31000/+0x38000. */
-+#define ADEC_SCRATCH_BASE   (VM_HLE_INJECT_BASE + 0x40000u)
-+#define ADEC_SCRATCH_STRIDE 0x4000u
-+#define ADEC_ITEM_EA(h)     (ADEC_SCRATCH_BASE + (u32)(h) * ADEC_SCRATCH_STRIDE)
-+/* The PCM block is up to 48 KB (ADEC_PCM_MAX_BYTES), more than the 16 KB
-+ * stride holds, so it lives in its own 64 KB per handle at +0x80000..+0xC0000,
-+ * past cellVdec's pic items at +0x50000. */
-+#define ADEC_PCM_EA(h)      (VM_HLE_INJECT_BASE + 0x80000u + (u32)(h) * 0x10000u)
-+/* The codec info block the PcmItem's bsiInfo points to, in the gap between
-+ * the 0x30-byte item and the PCM buffer. */
-+#define ADEC_BSI_EA(h)      (ADEC_ITEM_EA(h) + 0x40u)
-+#define ADEC_BSI_BYTES      0x40u
-+
-+/* ---------------------------------------------------------------------------
-+ * Internal state
-+ * -----------------------------------------------------------------------*/
-+#define MAX_ADEC 4
-+
-+typedef struct {
-+    int in_use;
-+    u32 codecType;
-+    u32 cbFunc;         /* guest EA of the callback's OPD */
-+    u32 cbArg;          /* guest EA handed back to it     */
-+    int seqStarted;
-+    u32 itemEa;         /* guest EA of the 0x30-byte CellAdecPcmItem */
-+    u32 pcmEa;          /* guest EA of the PCM buffer it points at    */
-+    int hasPcm;
-+    u32 pcmBytes;       /* size of the PCM block at pcmEa */
-+    u32 auCount;        /* total AUs decoded */
-+    void* ff;           /* AdecFf: the libavcodec decoder, or NULL */
-+    u8* au;             /* host copy of the AU being decoded */
-+    u32 auCap;
-+} AdecSlot;
-+
-+static AdecSlot s_adec[MAX_ADEC];
-+
-+/* ---------------------------------------------------------------------------
-+ * AC3 frame header: the frame's channel count (A/52 5.4.2), for the size of
-+ * the silent block when there is no decoder. 0 when it is not an AC3 frame.
-+ * -----------------------------------------------------------------------*/
-+static u32 adec_ac3_channels(const u8* f, u32 n)
-+{
-+    static const u8 nfchans[8] = { 2, 1, 2, 3, 3, 4, 4, 5 };
-+    if (!f || n < 8 || f[0] != 0x0B || f[1] != 0x77) return 0;
-+    if ((f[5] >> 3) > 10) return 0;          /* bsid > 10: E-AC3, not parsed */
-+    u32 bits = ((u32)f[6] << 8) | f[7];      /* acmod(3) [cmixlev surmixlev dsurmod] lfeon */
-+    u32 acmod = bits >> 13;
-+    int pos = 3;
-+    if ((acmod & 1u) && acmod != 1u) pos += 2;   /* cmixlev */
-+    if (acmod & 4u) pos += 2;                    /* surmixlev */
-+    if (acmod == 2u) pos += 2;                   /* dsurmod */
-+    return nfchans[acmod] + ((bits >> (15 - pos)) & 1u);
-+}
-+
-+/* ---------------------------------------------------------------------------
-+ * libavcodec back end (AC3)
-+ * -----------------------------------------------------------------------*/
-+#ifdef PS3RECOMP_FFMPEG_RUNTIME
-+
-+typedef struct AdecFf {
-+    const PS3FFmpeg* ff;
-+    AVCodecContext* ctx;
-+    AVPacket* pkt;
-+    AVFrame* frame;
-+    u8* buf;            /* the AU plus FFmpeg's zeroed input padding */
-+    u32 bufCap;
-+    u32* pcm;           /* big-endian float words, ADEC_PCM_MAX_BYTES */
-+} AdecFf;
-+
-+static void adec_ff_close(void* p)
-+{
-+    AdecFf* d = (AdecFf*)p;
-+    if (!d) return;
-+    if (d->ctx) d->ff->avcodec_free_context(&d->ctx);
-+    if (d->pkt) d->ff->av_packet_free(&d->pkt);
-+    if (d->frame) d->ff->av_frame_free(&d->frame);
-+    free(d->buf);
-+    free(d->pcm);
-+    free(d);
-+}
-+
-+static void* adec_ff_open(u32 codec_type)
-+{
-+    if (codec_type != CELL_ADEC_TYPE_AC3) return NULL;
-+    const PS3FFmpeg* ff = ps3_ffmpeg_get();
-+    if (!ff) return NULL;
-+    const AVCodec* codec = ff->avcodec_find_decoder(AV_CODEC_ID_AC3);
-+    if (!codec) {
-+        printf("[cellAdec] libavcodec has no AC3 decoder; silence\n");
-+        return NULL;
-+    }
-+    AdecFf* d = (AdecFf*)calloc(1, sizeof(*d));
-+    if (!d) return NULL;
-+    d->ff = ff;
-+    d->ctx = ff->avcodec_alloc_context3(codec);
-+    d->pkt = ff->av_packet_alloc();
-+    d->frame = ff->av_frame_alloc();
-+    d->pcm = (u32*)malloc(ADEC_PCM_MAX_BYTES);
-+    if (!d->ctx || !d->pkt || !d->frame || !d->pcm ||
-+        ff->avcodec_open2(d->ctx, codec, NULL) < 0) {
-+        printf("[cellAdec] could not open the libavcodec AC3 decoder; silence\n");
-+        adec_ff_close(d);
-+        return NULL;
-+    }
-+    return d;
-+}
-+
-+static void adec_ff_flush(void* p)
-+{
-+    AdecFf* d = (AdecFf*)p;
-+    if (d) d->ff->avcodec_flush_buffers(d->ctx);
-+}
-+
-+static float adec_ff_sample(const AVFrame* f, int ch, int c, int s)
-+{
-+    const u8* const* x = (const u8* const*)f->extended_data;
-+    switch (f->format) {
-+    case AV_SAMPLE_FMT_FLTP: return ((const float*)x[c])[s];
-+    case AV_SAMPLE_FMT_FLT:  return ((const float*)x[0])[s * ch + c];
-+    case AV_SAMPLE_FMT_S16P: return ((const int16_t*)x[c])[s] * (1.0f / 32768.0f);
-+    case AV_SAMPLE_FMT_S16:  return ((const int16_t*)x[0])[s * ch + c] * (1.0f / 32768.0f);
-+    case AV_SAMPLE_FMT_S32P: return (float)((const int32_t*)x[c])[s] * (1.0f / 2147483648.0f);
-+    case AV_SAMPLE_FMT_S32:  return (float)((const int32_t*)x[0])[s * ch + c] * (1.0f / 2147483648.0f);
-+    default:                 return 0.0f;
-+    }
-+}
-+
-+/* Decode one AU and store its PCM at guest dst as interleaved big-endian
-+ * float, frame after frame. Returns the bytes stored (0: nothing came out);
-+ * *channels gets the last frame's channel count. */
-+static u32 adec_ff_decode(void* p, const u8* au, u32 size, u32 dst, u32* channels)
-+{
-+    AdecFf* d = (AdecFf*)p;
-+    const PS3FFmpeg* ff = d->ff;
-+    if (size + AV_INPUT_BUFFER_PADDING_SIZE > d->bufCap) {
-+        u8* nb = (u8*)realloc(d->buf, size + AV_INPUT_BUFFER_PADDING_SIZE);
-+        if (!nb) return 0;
-+        d->buf = nb;
-+        d->bufCap = size + AV_INPUT_BUFFER_PADDING_SIZE;
-+    }
-+    memcpy(d->buf, au, size);
-+    memset(d->buf + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
-+    d->pkt->data = d->buf;
-+    d->pkt->size = (int)size;
-+    int r = ff->avcodec_send_packet(d->ctx, d->pkt);
-+    d->pkt->data = NULL;
-+    d->pkt->size = 0;
-+    u32 out = 0;
-+    if (r < 0) {
-+        static int _n = 0;
-+        if (PS3_LOG_FIRST(_n, 8))
-+            printf("[cellAdec] AC3 AU of %u bytes did not decode (%d)\n", size, r);
-+    }
-+    for (;;) {
-+        AVFrame* f = d->frame;
-+        if (ff->avcodec_receive_frame(d->ctx, f) < 0)
-+            break;                                  /* EAGAIN / EOF / error */
-+        int ch = f->ch_layout.nb_channels, ns = f->nb_samples;
-+        u32 bytes = (u32)ns * (u32)ch * 4u;
-+        if (ch < 1 || ch > 8 || ns <= 0 || out + bytes > ADEC_PCM_MAX_BYTES) {
-+            static int _n = 0;
-+            if (PS3_LOG_FIRST(_n, 4))
-+                printf("[cellAdec] dropping a decoded frame (%d samples x %d ch, %u bytes held)\n",
-+                       ns, ch, out);
-+            ff->av_frame_unref(f);
-+            continue;
-+        }
-+        u32 i = 0;
-+        for (int s = 0; s < ns; s++)
-+            for (int c = 0; c < ch; c++) {
-+                float v = adec_ff_sample(f, ch, c, s);
-+                u32 w;
-+                memcpy(&w, &v, 4);
-+                d->pcm[i++] = (w >> 24) | ((w >> 8) & 0xFF00u) | ((w << 8) & 0xFF0000u) | (w << 24);
-+            }
-+        vm_memcpy_to(dst + out, d->pcm, bytes);
-+        { static int _n = 0;
-+          if (PS3_LOG_FIRST(_n, 1))
-+              printf("[cellAdec] AC3 through libavcodec: %d samples x %d ch at %d Hz, %u bytes an AU\n",
-+                     ns, ch, f->sample_rate, bytes); }
-+        out += bytes;
-+        *channels = (u32)ch;
-+        ff->av_frame_unref(f);
-+    }
-+    return out;
-+}
-+
-+#else /* !PS3RECOMP_FFMPEG_RUNTIME */
-+
-+static void* adec_ff_open(u32 codec_type) { (void)codec_type; return NULL; }
-+static void  adec_ff_close(void* p) { (void)p; }
-+static void  adec_ff_flush(void* p) { (void)p; }
-+static u32   adec_ff_decode(void* p, const u8* au, u32 size, u32 dst, u32* channels)
-+{ (void)p; (void)au; (void)size; (void)dst; (void)channels; return 0; }
-+
-+#endif /* PS3RECOMP_FFMPEG_RUNTIME */
-+
-+/* Fire one guest callback.
-+ *
-+ * The guest's cbFunc is a guest EA naming an OPD, so it goes through the
-+ * recompiled code's dispatcher. It used to be cast to a host function pointer
-+ * and called directly, which jumped to the guest address as host code:
-+ *
-+ *     [CRASH] code=0xC0000005 rip=00000000001B5F00
-+ *     [CRASH] last HLE NID (cellAdecDecodeAu)
-+ *
-+ * 0x1B5F00 is the guest OPD. That crash is what this function exists to stop.
-+ *
-+ * ponytail: dispatched SYNCHRONOUSLY on the caller's thread rather than from a
-+ * decoder thread as lv2 does. The ceiling is a guest callback that blocks
-+ * waiting on the thread that called DecodeAu -- give this its own thread if a
-+ * title ever deadlocks here. */
-+static void adec_notify(CellAdecHandle handle, u32 msg_type, s32 msg_data)
-+{
-+    if (handle >= MAX_ADEC || !s_adec[handle].in_use) return;
-+    const AdecSlot* a = &s_adec[handle];
-+    { static int _n = 0;
-+      if (PS3_LOG_FIRST(_n, 4))
-+          printf("[cellAdec] notify h=%u msg=%u data=0x%X cb=0x%08X arg=0x%08X caller=%d\n",
-+                 handle, msg_type, (unsigned)msg_data, a->cbFunc, a->cbArg,
-+                 g_ps3_guest_caller ? 1 : 0); }
-+    if (!a->cbFunc || !g_ps3_guest_caller) return;
-+    g_ps3_guest_caller(a->cbFunc, (u64)handle, (u64)msg_type,
-+                       (u64)(s64)msg_data, (u64)a->cbArg, 0, 0, 0, 0);
-+}
-+
-+
-+/* ---------------------------------------------------------------------------
-+ * API implementations
-+ * -----------------------------------------------------------------------*/
-+
-+/* cellAdecQueryAttr: how much work memory the decoder wants, before Open.
-+ * CellAdecAttr (guest, big-endian): +0 u32 workMemSize, +4 u32 adecVerUpper,
-+ * +8 u32 adecVerLower. Decoding is host-side and never touches the buffer;
-+ * see cellVdecQueryAttr. */
-+s32 cellAdecQueryAttr(const CellAdecType* type, void* attr)
-+{
-+    u32 ea = (u32)(uintptr_t)attr;
-+    if (!type || !ea)
-+        return (s32)CELL_ADEC_ERROR_ARG;
-+    vm_write32(ea + 0x0, 0x40000);    /* workMemSize: 256 KB */
-+    vm_write32(ea + 0x4, 0x00010000); /* adecVerUpper */
-+    vm_write32(ea + 0x8, 0);          /* adecVerLower */
-+    return CELL_OK;
-+}
-+
-+/* cellAdecOpen(type, res, cb, handle) -- FOUR arguments.
-+ *
-+ * This took five, splitting the guest's CellAdecCb struct into cbFunc + cbArg,
-+ * which pushed `handle` off r6 onto r7. r7 held whatever happened to be there, so
-+ * the null check failed and every Open returned CELL_ADEC_ERROR_ARG. ps1_netemu
-+ * opens a decoder for CD-DA/XA audio inside its CD-ROM constructor and gives up on
-+ * the error -- so the disc was never mounted and the emulator sat in its run loop
-+ * with nothing to run. Signature confirmed against RPCS3 (Modules/cellAdec.cpp).
-+ *
-+ * cb is a guest pointer to { u32 cbFunc; u32 cbArg; }. */
-+s32 cellAdecOpen(const CellAdecType* type, const CellAdecResource* res,
-+                 const CellAdecCb* cb, CellAdecHandle* handle)
-+{
-+    (void)res;
-+
-+    u32 codec_type = type ? vm_read32(GUEST_EA(type)) : 0;   /* audioCodecType */
-+    u32 cb_ea      = (u32)(uintptr_t)cb;
-+    u32 handle_ea  = (u32)(uintptr_t)handle;
-+    printf("[cellAdec] Open(codecType=%u, cb=0x%08X, handle=0x%08X)\n",
-+           codec_type, cb_ea, handle_ea);
-+
-+    if (!type || !handle_ea)
-+        return (s32)CELL_ADEC_ERROR_ARG;
-+
-+    for (int i = 0; i < MAX_ADEC; i++) {
-+        if (!s_adec[i].in_use) {
-+            memset(&s_adec[i], 0, sizeof(AdecSlot));
-+            s_adec[i].in_use    = 1;
-+            s_adec[i].codecType = codec_type;
-+            if (cb_ea) {
-+                s_adec[i].cbFunc = vm_read32(cb_ea + 0);
-+                s_adec[i].cbArg  = vm_read32(cb_ea + 4);
-+            }
-+            /* The PcmItem is handed to the guest BY POINTER, so it cannot live
-+             * in host memory -- returning &host_struct is what crashed here
-+             * once already. */
-+            s_adec[i].itemEa = ADEC_ITEM_EA(i);
-+            s_adec[i].pcmEa  = ADEC_PCM_EA(i);
-+            s_adec[i].ff     = adec_ff_open(codec_type);
-+            vm_write32(handle_ea, (u32)i);
-+            printf("[cellAdec] Open -> handle=%u item=0x%08X pcm=0x%08X%s\n",
-+                   i, s_adec[i].itemEa, s_adec[i].pcmEa,
-+                   s_adec[i].ff ? " (decoding with libavcodec)" : "");
-+            return CELL_OK;
-+        }
-+    }
-+    return (s32)CELL_ADEC_ERROR_BUSY;
-+}
-+
-+s32 cellAdecClose(CellAdecHandle handle)
-+{
-+    printf("[cellAdec] Close(handle=%u)\n", handle);
-+
-+    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
-+        return (s32)CELL_ADEC_ERROR_ARG;
-+
-+    adec_ff_close(s_adec[handle].ff);
-+    free(s_adec[handle].au);
-+    s_adec[handle].ff = NULL;
-+    s_adec[handle].au = NULL;
-+    s_adec[handle].auCap = 0;
-+    s_adec[handle].in_use = 0;
-+    return CELL_OK;
-+}
-+
-+s32 cellAdecStartSeq(CellAdecHandle handle, void* param)
-+{
-+    (void)param;
-+    printf("[cellAdec] StartSeq(handle=%u)\n", handle);
-+
-+    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
-+        return (s32)CELL_ADEC_ERROR_ARG;
-+
-+    s_adec[handle].seqStarted = 1;
-+    adec_ff_flush(s_adec[handle].ff);   /* a new sequence starts clean */
-+    return CELL_OK;
-+}
-+
-+s32 cellAdecEndSeq(CellAdecHandle handle)
-+{
-+    /* ADEC_WHO=1: name the guest function driving this. The title calls EndSeq
-+     * hundreds of times against a single StartSeq, and the image has eight
-+     * EndSeq call sites -- the backtrace says which one. */
-+    { static int _n = -1;
-+      if (_n < 0) _n = getenv("ADEC_WHO") ? 0 : -2;
-+      if (_n >= 0 && _n < 8) { _n++;
-+          /* The guest lr, not a host backtrace. ppu_guest_caller maps host
-+           * frames to the nearest lifted function, and here it landed on
-+           * func_00013040 -- a single `blr`, so plainly a mis-attribution.
-+           * lr is written by the `bl` to the import stub, so it is exactly
-+           * (call site + 4) for a call like this one. */
-+          extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
-+          printf("[cellAdec] EndSeq from guest lr=0x%08X tid=%llu\n",
-+                 g_active_ctx ? (u32)g_active_ctx->lr : 0u,
-+                 g_active_ctx ? (unsigned long long)g_active_ctx->thread_id : 0ull); } }
-+    printf("[cellAdec] EndSeq(handle=%u)\n", handle);
-+
-+    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
-+        return (s32)CELL_ADEC_ERROR_ARG;
-+
-+    s_adec[handle].seqStarted = 0;
-+
-+    adec_notify(handle, CELL_ADEC_MSG_TYPE_SEQDONE, CELL_OK);
-+
-+    return CELL_OK;
-+}
-+
-+s32 cellAdecDecodeAu(CellAdecHandle handle, const CellAdecAuInfo* auInfo)
-+{
-+    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
-+        return (s32)CELL_ADEC_ERROR_ARG;
-+    if (!auInfo)
-+        return (s32)CELL_ADEC_ERROR_ARG;
-+
-+    AdecSlot* a = &s_adec[handle];
-+    const u32 au = GUEST_EA(auInfo);
-+    const u32 au_addr = vm_read32(au + (u32)offsetof(CellAdecAuInfo, startAddr));
-+    const u32 au_size = vm_read32(au + (u32)offsetof(CellAdecAuInfo, size));
-+    /* The AU info, read before AUDONE gives it back to the title. */
-+    const u32 au_w[4] = { vm_read32(au + 0x08), vm_read32(au + 0x0C),
-+                          vm_read32(au + 0x10), vm_read32(au + 0x14) };
-+
-+    printf("[cellAdec] DecodeAu(handle=%u, addr=0x%X, size=%u)\n",
-+           handle, au_addr, au_size);
-+
-+    /* The AC3 bytes are copied out first, too: AUDONE hands their buffer back
-+     * to the title's demuxer, which may refill it at once. */
-+    const u8* data = NULL;
-+    if (a->codecType == CELL_ADEC_TYPE_AC3 && au_addr && au_size && au_size <= 0x10000u) {
-+        if (au_size > a->auCap) {
-+            u8* nb = (u8*)realloc(a->au, au_size);
-+            if (nb) { a->au = nb; a->auCap = au_size; }
-+        }
-+        if (au_size <= a->auCap) {
-+            vm_memcpy_from(a->au, au_addr, au_size);
-+            data = a->au;
-+        }
-+    }
-+
-+    /* Step 1: report the AU consumed. msgData is the AU INFO ADDRESS, not a
-+     * status -- see RPCS3 Modules/cellAdec.cpp:1345. A decoder that tracks its
-+     * outstanding AUs by address gets a null back if this is CELL_OK. */
-+    adec_notify(handle, CELL_ADEC_MSG_TYPE_AUDONE, (s32)au);
-+
-+    /* Step 2: the PCM. AC3 through libavcodec when it is there; otherwise
-+     * silence of the codec's frame size (AC3: 1536 samples in the frame's
-+     * channels), so a title that counts PCM against time still runs. */
-+    a->auCount++;
-+    {
-+        const u32 it = a->itemEa;
-+        u32 ch = 0;
-+        u32 bytes = (a->ff && data) ? adec_ff_decode(a->ff, data, au_size, a->pcmEa, &ch) : 0;
-+        if (bytes == 0) {
-+            if (a->codecType == CELL_ADEC_TYPE_AC3) {
-+                ch = adec_ac3_channels(data, data ? au_size : 0);
-+                bytes = ADEC_AC3_SAMPLES * (ch ? ch : 2u) * 4u;
-+            } else {
-+                bytes = ADEC_PCM_BYTES;
-+            }
-+            vm_memset(a->pcmEa, 0, bytes);
-+        }
-+        a->pcmBytes = bytes;
-+
-+        vm_write32(it + PCMITEM_PCM_HANDLE, (u32)handle);
-+        vm_write32(it + PCMITEM_STATUS,     0);              /* CELL_OK */
-+        vm_write32(it + PCMITEM_START_ADDR, a->pcmEa);
-+        vm_write32(it + PCMITEM_SIZE,       bytes);
-+        /* bsiInfo must point at a codec info block, not be null. Resistance:
-+         * Fall of Man sizes each AC3 block from bsiInfo+0x14; with a null
-+         * pointer that read address 0x14 and came back 0, so its ring buffer
-+         * never filled, it never started its audio port, and its movie player
-+         * waited forever. Other titles' PCMOUT handlers take the AU's
-+         * PCM size from the same word. ponytail: only that output-size word is
-+         * filled; the rest of the block is zero until a title reads another
-+         * field. */
-+        const u32 bsi = ADEC_BSI_EA(handle);
-+        for (u32 o = 0; o < ADEC_BSI_BYTES; o += 4) vm_write32(bsi + o, 0);
-+        vm_write32(bsi + 0x14, bytes);
-+        vm_write32(it + PCMITEM_BSI_INFO,   bsi);
-+        /* Echo the AU back, which is what a real decoder does -- the guest
-+         * matches returned PCM against the AU it submitted. */
-+        vm_write32(it + PCMITEM_AU_START,        au_addr);
-+        vm_write32(it + PCMITEM_AU_SIZE,         au_size);
-+        vm_write32(it + PCMITEM_AU_PTS_HI,       au_w[0]);
-+        vm_write32(it + PCMITEM_AU_PTS_LO,       au_w[1]);
-+        vm_write32(it + PCMITEM_AU_USERDATA,     au_w[2]);
-+        vm_write32(it + PCMITEM_AU_USERDATA + 4, au_w[3]);
-+    }
-+    a->hasPcm = 1;
-+
-+    adec_notify(handle, CELL_ADEC_MSG_TYPE_PCMOUT, CELL_OK);
-+
-+    return CELL_OK;
-+}
-+
-+s32 cellAdecGetPcm(CellAdecHandle handle, void* outBuffer)
-+{
-+    { static int _n = 0; if (PS3_LOG_FIRST(_n, 6))
-+        printf("[cellAdec] GetPcm(handle=%u out=0x%08X)\n",
-+               handle, GUEST_EA(outBuffer)); }
-+    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
-+        return (s32)CELL_ADEC_ERROR_ARG;
-+
-+    if (!s_adec[handle].hasPcm)
-+        return (s32)CELL_ADEC_ERROR_EMPTY;
-+
-+    /* outBuffer is the GUEST's buffer: the AU's PCM block goes there, the
-+     * size the item and bsiInfo+0x14 announced. Leaving it untouched hands the
-+     * title whatever happened to be there, which it then plays. */
-+    { const u32 out = GUEST_EA(outBuffer);
-+      const AdecSlot* a = &s_adec[handle];
-+      if (out && a->pcmBytes)
-+          vm_memcpy_to(out, vm_ptr8(a->pcmEa), a->pcmBytes); }
-+
-+    s_adec[handle].hasPcm = 0;
-+    return CELL_OK;
-+}
-+
-+s32 cellAdecGetPcmItem(CellAdecHandle handle, const CellAdecPcmItem** pcmItem)
-+{
-+    { static int _n = 0; if (PS3_LOG_FIRST(_n, 6))
-+        printf("[cellAdec] GetPcmItem(handle=%u out=0x%08X hasPcm=%d)\n",
-+               handle, GUEST_EA(pcmItem),
-+               handle < MAX_ADEC ? s_adec[handle].hasPcm : -1); }
-+    if (handle >= MAX_ADEC || !s_adec[handle].in_use)
-+        return (s32)CELL_ADEC_ERROR_ARG;
-+
-+    if (!s_adec[handle].hasPcm)
-+        return (s32)CELL_ADEC_ERROR_EMPTY;
-+
-+    /* pcmItem is a GUEST CellAdecPcmItem**. Writing &host_struct here put a
-+     * HOST address into guest memory; the guest dereferenced it and died on a
-+     * wild address (rip 0x870D0E, fault 0xCFFDFFF0). Write the guest EA. */
-+    if (pcmItem)
-+        vm_write32(GUEST_EA(pcmItem), s_adec[handle].itemEa);
-+
-+    return CELL_OK;
-+}
++                ch = a->outCh ? a->outCh : adec_ac3_channels(data, data ? au_size : 0);
+                 bytes = ADEC_AC3_SAMPLES * (ch ? ch : 2u) * 4u;
+             } else {
+                 bytes = ADEC_PCM_BYTES;
 diff --git a/libs/codec/cellVdec.c b/libs/codec/cellVdec.c
 index 7e222c92..af208fb3 100644
 --- a/libs/codec/cellVdec.c
@@ -10174,7 +9338,7 @@ index 6e79ec31..98462f63 100644
  /* ppu_loader.cpp - each guest thread registers its context so a concurrent
   * stwcx can break its reservation. With g_resv_store_active off there is
 diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
-index 37e37454..adf0d1d7 100644
+index 37e37454..40e33888 100644
 --- a/runtime/ppu/ppu_fs.cpp
 +++ b/runtime/ppu/ppu_fs.cpp
 @@ -268,9 +268,20 @@ static DIR* fd_dir(int fd)
@@ -10255,7 +9419,26 @@ index 37e37454..adf0d1d7 100644
      /* PS3_FSLOG_EOF=<fd>,<bytes>: report end-of-file past <bytes> on one descriptor.
       * The intro cinematic is 28 seconds and this port renders it at a few frames
       * a second, so it cannot be watched to its end -- truncating the stream makes
-@@ -560,6 +608,13 @@ static void cellFsWrite(ppu_context* ctx)
+@@ -512,11 +560,13 @@ static void cellFsRead(ppu_context* ctx)
+     /* PS3_FSLOG_READS=<fd>: log every read on one descriptor. PS3_FSLOG caps at 20
+      * lines and they are all spent before a movie ever opens, so it cannot
+      * answer "is the streamer reading the .avi". */
+-    { static int wfd = -2;
+-      if (wfd == -2) { const char* e = ps3_env_once("PS3_FSLOG_READS"); wfd = e ? atoi(e) : -1; }
+-      if (wfd >= 0 && fd == wfd)
+-          fprintf(stderr, "[fsread] fd=%d want=%llu got=%zu pos=%ld\n",
+-                  fd, (unsigned long long)nbytes, n, fpos_before); }
++    { static int wfd = -2; static const char* wsub = NULL;   /* a value that is not a number = part of the guest path */
++      if (wfd == -2) { const char* e = ps3_env_once("PS3_FSLOG_READS");
++          if (e && *e && (*e < '0' || *e > '9')) { wsub = e; wfd = -1; } else wfd = e ? atoi(e) : -1; }
++      if ((wfd >= 0 && fd == wfd) || (wsub && fd >= 0 && fd < FS_MAX && strstr(g_fd_path[fd], wsub)))
++          fprintf(stderr, "[fsread] fd=%d want=%llu got=%zu pos=%ld buf=0x%08X tid=%llu lr=0x%08X t=%lld\n",
++                  fd, (unsigned long long)nbytes, n, fpos_before, buf,
++                  (unsigned long long)ctx->thread_id, (uint32_t)ctx->lr, fs_now_us() / 1000); }
+     if (ps3_env_once("PS3_FSLOG")) { static int _fd=0; if(PS3_LOG_FIRST(_fd, 20)) fprintf(stderr,"[FSDBG] fd=%d raw_nbytes=0x%llX clamped=0x%llX buf=0x%08X fpos_before=%ld n=%zu eof=%d err=%d\n", fd,(unsigned long long)raw_nbytes,(unsigned long long)nbytes,buf,fpos_before,n,feof(f),ferror(f)); }
+ #ifdef _WIN32
+     if (ps3_env_once("PS3_FSLOG") && buf==0 && raw_nbytes>0x10000) { static int _b=0; if(_b++<2){ void* fr[30]; unsigned short nn=RtlCaptureStackBackTrace(0,30,fr,0); uintptr_t mb=(uintptr_t)GetModuleHandleA(0); fprintf(stderr,"[FSBT] null-buf read caller rvas:"); for(unsigned short i=0;i<nn&&i<16;i++) fprintf(stderr," %llX",(unsigned long long)((uintptr_t)fr[i]-mb)); fprintf(stderr,"\n"); } }
+@@ -560,6 +610,13 @@ static void cellFsWrite(ppu_context* ctx)
      uint32_t nwr_ptr = (uint32_t)ctx->gpr[6];
      FILE* f = fd_file(fd);
      if (!f) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EBADF; return; }
@@ -10934,65 +10117,215 @@ index 97a9d17f..1ed97f7c 100644
      if (ok)
          ppu_cr_set(ctx, 0, PPU_CR_EQ | (PPU_CR_SO * ppu_xer_get_so(ctx)));
 diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
-index fd2c2078..870a8131 100644
+index fd2c2078..ff34eda8 100644
 --- a/runtime/ppu/ppu_sysprx.cpp
 +++ b/runtime/ppu/ppu_sysprx.cpp
-@@ -415,9 +415,30 @@ static void sys_lwcond_create(ppu_context* ctx)
+@@ -411,35 +411,196 @@ static void sys_lwcond_create(ppu_context* ctx)
+     uint32_t lwcond  = (uint32_t)ctx->gpr[3];
+     uint32_t lwmutex = (uint32_t)ctx->gpr[4];
+     vm_write32(lwcond + 0x00, lwmutex);
+-    vm_write32(lwcond + 0x04, ++s_lwcond_id);
++    /* The id names the lwcond (lwc_key below): two threads creating at once must not share one. */
++#ifdef _WIN32
++    vm_write32(lwcond + 0x04, (uint32_t)InterlockedIncrement((volatile LONG*)&s_lwcond_id));
++#else
++    vm_write32(lwcond + 0x04, __atomic_add_fetch(&s_lwcond_id, 1, __ATOMIC_SEQ_CST));
++#endif
      ctx->gpr[3] = 0;
  }
  static void sys_lwcond_destroy(ppu_context* ctx)    { ctx->gpr[3] = 0; }
 -static void sys_lwcond_signal(ppu_context* ctx)     { ctx->gpr[3] = 0; }
 -static void sys_lwcond_signal_all(ppu_context* ctx) { ctx->gpr[3] = 0; }
 -static void sys_lwcond_signal_to(ppu_context* ctx)  { ctx->gpr[3] = 0; }
-+/* Local patch #69: real wakeups. The waits used to be Sleep(1) polls with no-op signals:
-+ * ~8000 waits/s over ~15 threads during a race load (measured 2026-11-27), each wake-up up to
-+ * 1-2 ms late and the idle ones burning CPU. Now every lwcond hashes to a generation counter:
-+ * wait reads it (still holding the lwmutex), releases, and sleeps on the address until a signal
-+ * bumps it or 5 ms pass (the guest loop re-checks its predicate, so a late or spurious wake is
-+ * harmless and a missed signal costs 5 ms, not a hang). LWCOND_WAKE=0 = the old Sleep(1). */
+-/* Now that the lwmutex is REAL, a no-op wait that keeps holding it deadlocks the
+- * signaler. Release the paired lwmutex, wait briefly, reacquire (poll-style: the
+- * guest's while(!predicate) loop re-checks; signalers stay no-ops). Handles the
+- * common single (non-recursive) hold. */
++/* Local patch #73 (replaces #69's generation counters): lwcond with lv2's semantics.
++ *   - a wait returns only when a signal chose it, or with CELL_ETIMEDOUT when its timeout (r4,
++ *     microseconds, 0 = none) ran out: no spurious CELL_OK. #69 woke every waiter every 5 ms and on
++ *     any signal of a hash slot, which is harmless only when the guest re-checks a predicate.
++ *     MotorStorm: Apocalypse's movie read-ahead thread (func_00F215C0) does not: it waits ONCE, then
++ *     fills its 5.5 MB cache. Woken with no signal while the reader did its own one-time fill
++ *     (func_00508AE8, R > 64 KB), both read the same request from the shared sequential file, the
++ *     cache held bytes of the wrong offset and the AVI demuxer lost the stream ("movie stalls at its
++ *     27th access unit", 2026-11-27).
++ *   - signal wakes ONE waiter (the oldest), signal_all every current one, signal_to the given thread;
++ *     a signal with nobody waiting is lost, as on the console.
++ * The waiter is queued BEFORE its lwmutex is released, so a signal sent by a thread that takes the
++ * lwmutex right after cannot be missed.
++ *   LWCOND_WAKE=1  #69's behaviour (5 ms polls, a signal wakes its whole hash slot);  =0  Sleep(1)
++ *   LWCOND_MAX_MS=<n>  diagnostic: a wait without timeout returns CELL_OK after n ms anyway */
 +#ifdef _WIN32
 +#pragma comment(lib, "synchronization")
 +#endif
 +static volatile uint32_t s_lwc_gen[256];
-+static int s_lwc_wake = -1;
++static int s_lwc_wake = -1, s_lwc_max_ms = 0;
 +static inline unsigned lwc_slot(uint32_t lwcond) { return (lwcond >> 3) & 255u; }
-+static void lwc_bump(ppu_context* ctx)
++/* What names an lwcond is the queue id sys_lwcond_create stored at +4, not the address of the
++ * sys_lwcond_t: the title's C++ runtime waits on a COPY of the struct made on its stack
++ * (func_0101D8D4) and signals through the original. Keyed by address, those signals found nobody. */
++static inline uint32_t lwc_key(uint32_t lwcond) { uint32_t id = vm_read32(lwcond + 0x04); return id ? id : lwcond; }
++static void lwc_mode_init(void)
++{
++    if (s_lwc_wake >= 0) return;
++    const char* m = getenv("LWCOND_MAX_MS");
++    s_lwc_max_ms = m ? atoi(m) : 0;
++    const char* e = getenv("LWCOND_WAKE");
++    s_lwc_wake = !e ? 2 : (e[0] == '0') ? 0 : (e[0] == '1') ? 1 : 2;
++}
++#ifdef _WIN32
++struct LwcWaiter { struct LwcWaiter* next; uint32_t lwcond; uint32_t tid; volatile LONG signalled; };
++static SRWLOCK s_lwc_lock = SRWLOCK_INIT;
++static struct LwcWaiter* s_lwc_head = NULL;       /* oldest first */
++/* The last signals, for the "waits for 5 s" report below: which lwcond, how, for whom, by whom, and
++ * how many waiters it woke. */
++struct LwcSig { uint32_t lwcond, target, by; uint8_t which, woke; long long us; };
++static struct LwcSig s_lwc_sigs[512];
++static volatile LONG s_lwc_sign = 0;
++/* which: 0 = the oldest waiter of this lwcond, 1 = all of them, 2 = the one of thread `tid` */
++static void lwc_signal(uint32_t lwcond, int which, uint32_t tid, uint32_t by)
++{
++    struct LwcWaiter* woken = NULL;
++    AcquireSRWLockExclusive(&s_lwc_lock);
++    for (struct LwcWaiter** pp = &s_lwc_head; *pp; ) {
++        struct LwcWaiter* w = *pp;
++        if (w->lwcond != lwcond || (which == 2 && w->tid != tid)) { pp = &w->next; continue; }
++        *pp = w->next;                            /* unlinked here: the waiter only reads `signalled` */
++        w->next = woken; woken = w;
++        if (which != 1) break;
++    }
++    { int nw = 0; for (struct LwcWaiter* w = woken; w; w = w->next) nw++;
++      struct LwcSig* g = &s_lwc_sigs[(uint32_t)(InterlockedIncrement(&s_lwc_sign) - 1) & 511u];
++      g->lwcond = lwcond; g->target = tid; g->by = by; g->which = (uint8_t)which; g->woke = (uint8_t)nw; g->us = lwm_now_us(); }
++    /* Still under the lock: a waiter leaves its wait (and its stack frame) only after it has seen
++     * `signalled` or taken this lock, so the records are alive here. */
++    for (struct LwcWaiter* w = woken; w; ) {
++        struct LwcWaiter* nx = w->next;
++        InterlockedExchange(&w->signalled, 1);
++        WakeByAddressAll((PVOID)&w->signalled);
++        w = nx;
++    }
++    ReleaseSRWLockExclusive(&s_lwc_lock);
++}
++#endif
++static void lwc_bump(ppu_context* ctx, int which)
 +{
 +#ifdef _WIN32
-+    unsigned i = lwc_slot((uint32_t)ctx->gpr[3]);
-+    InterlockedIncrement((volatile LONG*)&s_lwc_gen[i]);
-+    WakeByAddressAll((PVOID)&s_lwc_gen[i]);
++    lwc_mode_init();
++    if (s_lwc_wake == 2) {
++        lwc_signal(lwc_key((uint32_t)ctx->gpr[3]), which, (uint32_t)ctx->gpr[4], LWM_SELF(ctx));
++    } else {
++        unsigned i = lwc_slot((uint32_t)ctx->gpr[3]);
++        InterlockedIncrement((volatile LONG*)&s_lwc_gen[i]);
++        WakeByAddressAll((PVOID)&s_lwc_gen[i]);
++    }
++#else
++    (void)which;
 +#endif
 +    ctx->gpr[3] = 0;
 +}
-+static void sys_lwcond_signal(ppu_context* ctx)     { lwc_bump(ctx); }
-+static void sys_lwcond_signal_all(ppu_context* ctx) { lwc_bump(ctx); }
-+static void sys_lwcond_signal_to(ppu_context* ctx)  { lwc_bump(ctx); }
- /* Now that the lwmutex is REAL, a no-op wait that keeps holding it deadlocks the
-  * signaler. Release the paired lwmutex, wait briefly, reacquire (poll-style: the
-  * guest's while(!predicate) loop re-checks; signalers stay no-ops). Handles the
-@@ -433,8 +454,21 @@ static void sys_lwcond_wait(ppu_context* ctx)
++static void sys_lwcond_signal(ppu_context* ctx)     { lwc_bump(ctx, 0); }
++static void sys_lwcond_signal_all(ppu_context* ctx) { lwc_bump(ctx, 1); }
++static void sys_lwcond_signal_to(ppu_context* ctx)  { lwc_bump(ctx, 2); }
++/* The paired lwmutex is released for the wait and taken back before returning, with its owner and
++ * recursion count restored. */
+ static void sys_lwcond_wait(ppu_context* ctx)
+ {
+     uint32_t lwcond  = (uint32_t)ctx->gpr[3];
++    uint64_t timeout = ctx->gpr[4];               /* microseconds, 0 = wait for a signal */
+     uint32_t lwmutex = vm_read32(lwcond + 0x00);
+     struct LwmSlot* sl = lwm_slot(lwmutex);
++    uint32_t result = 0;
+     if (sl) {
+         uint32_t own = vm_read32(lwmutex + LWM_OWNER);
+         uint32_t rc  = vm_read32(lwmutex + LWM_RECUR);
++#ifdef _WIN32
++        lwc_mode_init();
++        if (s_lwc_wake == 2) {
++            const uint32_t key = lwc_key(lwcond);
++            struct LwcWaiter w; w.next = NULL; w.lwcond = key; w.tid = LWM_SELF(ctx); w.signalled = 0;
++            AcquireSRWLockExclusive(&s_lwc_lock);
++            { struct LwcWaiter** pp = &s_lwc_head; while (*pp) pp = &(*pp)->next; *pp = &w; }
++            ReleaseSRWLockExclusive(&s_lwc_lock);
++            vm_write32(lwmutex + LWM_RECUR, 0);
++            vm_write32(lwmutex + LWM_OWNER, 0);
++            ppu_thread_note_block(ctx->thread_id);
++            lwm_release(sl);
++            if (!timeout && s_lwc_max_ms > 0) timeout = (uint64_t)s_lwc_max_ms * 1000u;
++            const long long deadline = timeout ? lwm_now_us() + (long long)(timeout > (1ull << 40) ? (1ull << 40) : timeout) : 0;
++            LONG zero = 0;
++            const long long t_wait = lwm_now_us();
++            int reported = 0;
++            while (!w.signalled) {
++                DWORD ms = 5000;                  /* a slice, not a wake-up: the loop goes on */
++                if (timeout) {
++                    const long long left = deadline - lwm_now_us();
++                    if (left <= 0) break;
++                    const unsigned long long m = ((unsigned long long)left + 999) / 1000;
++                    if (m < ms) ms = (DWORD)m;
++                }
++                WaitOnAddress((volatile VOID*)&w.signalled, &zero, sizeof(zero), ms);
++                /* LWCOND_WATCH=1: name a wait without timeout that has lasted 5 s, with the signals
++                 * its lwcond got meanwhile (a signal_to for another thread, a signal before the wait). */
++                if (!w.signalled && !timeout && !reported && lwm_now_us() - t_wait >= 5000000) {
++                    static int s_watch = -1; static volatile LONG s_lines = 0;
++                    if (s_watch < 0) { const char* e = getenv("LWCOND_WATCH"); s_watch = (e && e[0] != '0') ? 1 : 0; }
++                    reported = 1;
++                    if (s_watch && InterlockedIncrement(&s_lines) <= 64) {
++                        char b[1200]; int p = snprintf(b, sizeof b, "[lwcond] tid=%u waits 5 s on lwcond 0x%08X id 0x%08X (lwmutex 0x%08X) lr=0x%08X; its signals:",
++                                                       w.tid, lwcond, key, lwmutex, (uint32_t)ctx->lr);
++                        const uint32_t n = (uint32_t)s_lwc_sign; int shown = 0;
++                        for (uint32_t i = n > 512 ? n - 512 : 0; i < n && shown < 12; i++) {
++                            const struct LwcSig* g = &s_lwc_sigs[i & 511u];
++                            if (g->lwcond != key) continue;
++                            p += snprintf(b + p, sizeof(b) - p, " [%s%s%u by %u woke %u %+lld ms]", g->which == 1 ? "all" : g->which == 2 ? "to " : "one",
++                                          g->which == 2 ? "" : " ", g->which == 2 ? g->target : 0u, g->by, g->woke, (g->us - t_wait) / 1000);
++                            shown++;
++                        }
++                        fprintf(stderr, "%s%s\n", b, shown ? "" : " none in the last 512");
++                    }
++                }
++            }
++            /* Timed out: leave the queue, unless a signal took this record meanwhile (then it counts). */
++            AcquireSRWLockExclusive(&s_lwc_lock);
++            if (!w.signalled) {
++                for (struct LwcWaiter** pp = &s_lwc_head; *pp; pp = &(*pp)->next)
++                    if (*pp == &w) { *pp = w.next; break; }
++                if (ctx->gpr[4] || s_lwc_max_ms <= 0) result = 0x8001000Bu;   /* CELL_ETIMEDOUT */
++            }
++            ReleaseSRWLockExclusive(&s_lwc_lock);
++        } else {
++            vm_write32(lwmutex + LWM_RECUR, 0);
++            vm_write32(lwmutex + LWM_OWNER, 0);
++            ppu_thread_note_block(ctx->thread_id);
++            if (s_lwc_wake) {
++                unsigned gi = lwc_slot(lwcond);
++                LONG seen = (LONG)s_lwc_gen[gi];
++                lwm_release(sl);
++                WaitOnAddress((volatile VOID*)&s_lwc_gen[gi], &seen, sizeof(seen), 5);
++            } else {
++                lwm_release(sl);
++                Sleep(1);
++            }
++        }
++#else
++        (void)timeout;
          vm_write32(lwmutex + LWM_RECUR, 0);
          vm_write32(lwmutex + LWM_OWNER, 0);
          ppu_thread_note_block(ctx->thread_id);
-+#ifdef _WIN32
-+        if (s_lwc_wake < 0) { const char* e = getenv("LWCOND_WAKE"); s_lwc_wake = !(e && e[0] == '0'); }
-+        if (s_lwc_wake) {
-+            unsigned gi = lwc_slot(lwcond);
-+            LONG seen = (LONG)s_lwc_gen[gi];
-+            lwm_release(sl);
-+            WaitOnAddress((volatile VOID*)&s_lwc_gen[gi], &seen, sizeof(seen), 5);
-+        } else {
-+            lwm_release(sl);
-+            Sleep(1);
-+        }
-+#else
          lwm_release(sl);
          Sleep(1);
 +#endif
          lwm_acquire(sl, 0);
          vm_write32(lwmutex + LWM_OWNER, own);
          vm_write32(lwmutex + LWM_RECUR, rc ? rc : 1);
+     }
+-    ctx->gpr[3] = 0;
++    ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)result;
+ }
+ 
+ /* sys_ppu_thread_get_id(vm::ptr<u64> id) -> *id = calling thread's real id.
 diff --git a/runtime/ppu/ppu_vmx.h b/runtime/ppu/ppu_vmx.h
 index f1646788..b1347774 100644
 --- a/runtime/ppu/ppu_vmx.h

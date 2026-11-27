@@ -10,3 +10,9 @@
 0x0082E4C8   # Text::SetText(widget, text): the host's off-screen lobby texts "~MSL?~..." (players, mode, track of its LAN game). docs/reseau.md
 0x0054A4D0   # GameSearch screen: fills one row of the LAN games list: then mode (column 1) and track (column 3) from the host's record. docs/reseau.md
 0x00EB3C24   # network library: takes the record of the LAN game this instance hosts (r4): players, mode and track added on the way. docs/reseau.md
+# movie player trace (MOVIE_TRACE=<file>, port/movie_trace.cpp; docs/hle.md "Real movies")
+0x009E70A4   # AVI demuxer: a chunk header is parsed
+0x009E00D0   # demuxer -> track queue: one access unit delivered
+0x009F74D0   # ring-buffer source: Skip(n)
+0x009F4040   # ring buffer: writer commit
+0x009F7550   # ring-buffer source: Seek(pos)

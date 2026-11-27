@@ -12,15 +12,17 @@ with a runtime that stands in for the console (Direct3D 12, sound, controller, l
 port's sources, the launcher, the scripts and our changes to ps3recomp. You need your own disc of
 the game and the firmware of your own console to use it.
 
-## Status (25 November 2026)
+## Status (27 November 2026)
 
 - The game boots, the menus work, and races run to the end with a correct picture on the two
   tracks tried so far (the bridge and the pier).
 - A steady 30 frames per second (the game's own cap) on an i7-10700F and an RTX 4070 SUPER.
 - Renders at 720p by default; true 1080p and 1440p are available (`PORT_RES=1920x1080`).
-- Sound and music work. Movies are replaced by a short clip.
+- Sound and music work.
+- The game's movies play, picture and sound, when FFmpeg's DLLs are beside the exe (see
+  "Movies, and a smaller copy of the game"); without them every movie is a short clip.
 - Multiplayer on a local network with no server, using the LAN mode the game already contains;
-  tried with two and three instances on one machine, not yet between two PCs.
+  played between two PCs, and tried with up to four instances on one machine.
 - Known defect: dark squares around the vehicles.
 
 ## What is in the repository
@@ -70,6 +72,46 @@ The steps, in order:
 
 Many scripts and the `.bat` files still carry the paths of the machine the project was born on
 (`I:\Projets\Recomp`, `F:\Jeux\PS3`, `E:\ms_perf`): adapt them to yours.
+
+## Movies, and a smaller copy of the game
+
+**Playing the movies.** The game decodes its movies (XVID picture, AC-3 sound) through the
+console's decoders; the port hands that work to FFmpeg, loaded at run time. Get an LGPL "shared"
+build of FFmpeg 8 (for instance from [BtbN's builds](https://github.com/BtbN/FFmpeg-Builds)),
+give its `include` folder to the build (`port\build.bat` says where it looks) and put
+`avcodec-62.dll`, `avutil-60.dll` and `swresample-6.dll` beside the game's exe. FFmpeg is not part
+of this repository. `PORT_PLAY_VIDEOS=0` goes back to the short clip; START skips a movie.
+
+**Why the game is so big.** Of the ~21 GB of the disc, 16 GB are the folder
+`PS3_GAME\USRDIR\ui\video`: 56 movies, each in three variants (`_60`, `_50`, `_3d`) at 13 to
+20 Mbit/s. The port only ever reads the `_60` one.
+
+**Making it smaller**, in three steps. You need `ffmpeg.exe` (same FFmpeg build) and a graphics
+card with an H.264 encoder (NVIDIA by default: `--encoder` picks another one).
+
+1. Re-encode the 56 `_60` movies to H.264 (about six minutes; 5.6 GB become 2.8 GB):
+
+   ```
+   python scripts\video_convert.py "<game>\PS3_GAME\USRDIR\ui\video" "<game>\recomp\video" --ffmpeg <path to ffmpeg.exe>
+   ```
+
+   Only the picture is re-encoded. Each result is an AVI of the same structure as the original:
+   the sound tracks (up to nine languages), the subtitles and the chunk order are copied as they
+   are, which is why the script writes the file itself instead of letting FFmpeg do it. `--cq`
+   sets the quality (default 24, lower = bigger and closer to the original).
+2. Check that the game plays them: the port uses `<game>\recomp\video\<name>.avi` instead of the
+   disc's file whenever it exists (the log says `[port] video: ... -> /dev_bdvd/recomp/video/...`).
+   `PORT_VIDEO_CONVERTED=0` ignores them.
+3. Move `PS3_GAME\USRDIR\ui\video` out of the game folder, to a backup you keep: the game no
+   longer needs it. The folder then weighs about 8.6 GB instead of 24.
+
+`scripts\slim_copy.ps1 -Out <new folder>` does the same for a second copy (another PC of a LAN
+game): it copies the game folder without `ui\video` and adds the re-encoded movies, leaving the
+source untouched. `scripts\vfs_link_copy.ps1` builds such a copy out of links, in a second, to
+try the result before moving anything.
+
+Keep the original movies somewhere: the re-encoded ones are a lossy copy, and a later, better
+conversion can only start from the originals.
 
 ## Credits
 
