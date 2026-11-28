@@ -33,7 +33,8 @@ param(
     [int]$DriveSeconds = 60,
     [int]$DriveLag = 3,
     [int]$Races = 1,
-    [int]$LeaveAt = 0
+    [int]$LeaveAt = 0,
+    [switch]$V106              # the 1.06 build (PORT_V106): log run106.log, After Party page instead of the title
 )
 $ErrorActionPreference = 'Stop'
 $port = Join-Path $PSScriptRoot '..\port'
@@ -47,7 +48,7 @@ $inst = @(1..$Players | ForEach-Object {
     [pscustomobject]@{
         N     = $_
         Pad   = Join-Path $env:TEMP $(if ($_ -eq 1) { 'motorstorm_pad.txt' } else { "motorstorm_pad$_.txt" })
-        Log   = Join-Path $port $(if ($_ -eq 1) { 'run.log' } else { "run_p$_.log" })
+        Log   = Join-Path $port $(if ($_ -eq 1) { $(if ($V106) { 'run106.log' } else { 'run.log' }) } else { "run_p$_.log" })
         Title = $(if ($_ -eq 1) { '^ps3recomp \|' } else { "^ps3recomp P$_ \|" })
         Tag   = $(if ($_ -eq 1) { 'h' } elseif ($_ -eq 2) { 'j' } else { "p$_" })
         Name  = $(if ($_ -eq 1) { 'HOST' } else { "INSTANCE $_" })
@@ -67,7 +68,8 @@ function Wait-Title($i) {
     # (PORT_GAME_LOG must let "Switching Screen" through: '1' does).
     $boot = 'HealthWarning', 'LegalInformation', 'AutoSaveWarning', 'SCEEPresents', 'EvolutionStudios', 'VidIntermediaryScreen', 'GameIntro'
     $lastStart = [datetime]::MinValue
-    while (-not (Test-Path $i.Log) -or -not (Select-String -Path $i.Log -Pattern 'to "TitleScreen"' -Quiet)) {
+    $titlePat = $(if ($V106) { 'LogicFullyActive \[AnnouncementDisplayLogic\]' } else { 'to "TitleScreen"' })
+    while (-not (Test-Path $i.Log) -or -not (Select-String -Path $i.Log -Pattern $titlePat -Quiet)) {
         if (((Get-Date) - $t0).TotalSeconds -gt 300) { throw "$($i.Name): title screen not reached" }
         Start-Sleep -Milliseconds 500
         if (Test-Path $i.Log) {
@@ -78,7 +80,7 @@ function Wait-Title($i) {
             }
         }
     }
-    Start-Sleep 2
+    if ($V106) { Start-Sleep 6 } else { Start-Sleep 2 }
     Write-Host ("{0}: title after {1:N0}s" -f $i.Name, ((Get-Date) - $t0).TotalSeconds)
 }
 function To-Multiplayer($to) {
@@ -90,6 +92,7 @@ function To-Multiplayer($to) {
 }
 foreach ($i in $inst) { Set-Content -Path $i.Pad -Value '' -NoNewline; if (Test-Path $i.Log) { Remove-Item $i.Log -Force } }
 $env:PORT_GAME_LOG = $GameLog; $env:PORT_GAME_LOG_MAX = '40'; $env:PS3_NET_TRACE = '1'
+if ($V106) { $env:PORT_V106 = '1' }
 $env:PORT_LAN_LOCAL = "$Players"   # instance k = 127.0.0.k, broadcasts sent to all the others (run_lan.bat)
 $env:PAD_FILE = $hostI.Pad         # instance 1 only: run_lan.bat sets the pad file of the others
 Start-Process -FilePath cmd.exe -ArgumentList '/c', (Join-Path $port 'run_lan.bat'), 'Pilote1', '1' -WindowStyle Minimized
@@ -99,7 +102,7 @@ foreach ($i in $others) {
     Start-Process -FilePath cmd.exe -ArgumentList '/c', (Join-Path $port 'run_lan.bat'), "Pilote$($i.N)", "$($i.N)" -WindowStyle Minimized
     Start-Sleep 2
 }
-Remove-Item env:PORT_GAME_LOG, env:PORT_GAME_LOG_MAX, env:PS3_NET_TRACE, env:PORT_LAN_LOCAL
+Remove-Item env:PORT_GAME_LOG, env:PORT_GAME_LOG_MAX, env:PS3_NET_TRACE, env:PORT_LAN_LOCAL, env:PORT_V106 -ErrorAction SilentlyContinue
 foreach ($i in $inst) { Wait-Title $i }
 Start-Sleep 20
 To-Multiplayer $hostI

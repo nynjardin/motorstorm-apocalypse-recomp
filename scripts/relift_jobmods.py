@@ -25,8 +25,13 @@ import hashlib, json, os, re, struct, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 SPU = os.path.join(ROOT, 'port', 'spu')
-MAN = os.path.join(SPU, 'jobmods_manifest.json')
-ELF = os.path.join(ROOT, 'game', 'BCES00484', 'EBOOT.elf')
+# MS_TITLE=BCES00484_106: the 1.06 EBOOT's modules (manifest and register TU with a _106 suffix, the module
+# directories are shared: their names carry the content hash)
+TITLE = os.environ.get('MS_TITLE', 'BCES00484')
+SUF = '' if TITLE == 'BCES00484' else '_106'
+MAN = os.path.join(SPU, 'jobmods_manifest%s.json' % SUF)
+REG = os.path.join(SPU, 'jobmods_register%s.c' % SUF)
+ELF = os.path.join(ROOT, 'game', TITLE, 'EBOOT.elf')
 TOOLS = os.path.normpath(os.path.join(ROOT, '..', 'ps3recomp', 'tools'))
 sys.path.insert(0, TOOLS)
 os.chdir(TOOLS)   # toolkit tools import siblings

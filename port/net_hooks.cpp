@@ -15,6 +15,7 @@
  *   PORT_NET_LAN=1   the title's LAN back end instead of the Medius one (default 0 = as shipped)
  */
 #include "ppu_recomp.h"     /* ppu_context, vm_read32 / vm_write32 */
+#include "title_addrs.h"   /* addresses / offsets of the disc EBOOT or of the 1.06 one (PORT_V106) */
 
 #include <atomic>
 #include <chrono>
@@ -177,17 +178,17 @@ int port_hook_0038A8D0(ppu_context* c)
     const int n = s_n.fetch_add(1);
     if (!net_lan()) {
         if (n < 16) std::fprintf(stderr, "[port-net] LanOrWan <- %d (was %d), lr 0x%08X\n",
-                                 asked, (int32_t)vm_read32(self + 0xC40), (uint32_t)c->lr);
+                                 asked, (int32_t)vm_read32(self + T_NGD_NETMODE), (uint32_t)c->lr);
         return 0;
     }
-    const int32_t was = (int32_t)vm_read32(self + 0xC40);
-    const uint32_t idx = vm_read32(self + 0xD48);
+    const int32_t was = (int32_t)vm_read32(self + T_NGD_NETMODE);
+    const uint32_t idx = vm_read32(self + T_NGD_GUARD_IDX);
     const int32_t stored = asked ? -1 : 0;
-    vm_write32(self + 0xC40, (uint32_t)stored);
+    vm_write32(self + T_NGD_NETMODE, (uint32_t)stored);
     if (n < 16)
         std::fprintf(stderr, "[port-net] LanOrWan <- %d asked, %d stored (was %d, guard byte %d), "
                              "NetGlobalData 0x%08X, lr 0x%08X\n",
-                     asked, stored, was, (int)(int8_t)vm_read8(self + idx + 0xD3B), self, (uint32_t)c->lr);
+                     asked, stored, was, (int)(int8_t)vm_read8(self + idx + T_NGD_GUARD_OFS), self, (uint32_t)c->lr);
     return 1;
 }
 
@@ -298,10 +299,8 @@ static void guest_call(void (*fn)(ppu_context*), ppu_context* c)
 
 static void save_profile_now(ppu_context* c, int32_t player)
 {
-    const uint32_t g = vm_read32(0x0144FB4Cu);
-    const uint32_t a = g ? vm_read32(g + 0x29C) : 0;
-    const uint32_t b = a ? vm_read32(a + 0x294) : 0;
-    const uint32_t mgr = b ? vm_read32(b + 0x84) : 0;
+    const uint32_t g = vm_read32(T_APP_GLOBAL_ADDR);
+    const uint32_t mgr = T_PROFILE_MANAGER_CHAIN(vm_read32, g);
     if (!mgr) return;
     const ppu_context saved = *c;
     c->gpr[3] = mgr; c->gpr[4] = (uint64_t)(int64_t)player; c->lr = 0;
@@ -370,6 +369,7 @@ int port_hook_007625C8(ppu_context* c)
     return 0;
 }
 
+#ifndef PORT_V106   /* 1.06: the three functions of this block are not mapped yet (docs/PROGRESS.md) */
 /* ---------------------------------------------------------------------------------------------
  * What a LAN game is (players, game mode, track), shown in the list of games.
  *
@@ -563,6 +563,41 @@ int port_hook_0054A4D0(ppu_context* c)
     return 1;
 }
 
+#endif /* !PORT_V106 */
+
+#ifdef PORT_V106
+/* ---------------------------------------------------------------------------------------------
+ * 1.06: the games list (screen CustomGamesList, production list) drops a LAN game.
+ * The list keeps up to 63 entries of 0x12C bytes at (list object + 0x1044), a valid flag at +0x128.
+ * Its expiry pass, func_003E17A8(list = r3), logs "Invalidating Game Entry No Players" and clears an
+ * entry whose players word (+0xD0) or word +0x100 is 0: a LAN host's record has neither (the title
+ * fills them from the online matchmaking server). The disc build's developer screen never tested
+ * them. Before every pass the zero words of a valid entry are set to 1.
+ *   PORT_LAN_LIST_FIX=0   leave the entries as the title has them (the list stays empty)
+ *   PORT_LAN_LIST_TRACE=1 prints the words of the first valid entries seen
+ * ------------------------------------------------------------------------------------------- */
+int port_hook_003E17A8(ppu_context* c)
+{
+    static const int on = [] { const char* e = std::getenv("PORT_LAN_LIST_FIX"); return (e && e[0] == '0') ? 0 : 1; }();
+    static const int trace = [] { const char* e = std::getenv("PORT_LAN_LIST_TRACE"); return (e && e[0] == '1') ? 1 : 0; }();
+    static std::atomic<int> s_n{0};
+    if (!on || !net_lan()) return 0;
+    const uint32_t self = (uint32_t)c->gpr[3];
+    if (self < 0x10000u) return 0;
+    for (uint32_t i = 0; i < 0x3Fu; i++) {
+        const uint32_t e = self + 0x1044u + i * 0x12Cu;
+        if (!vm_read8(e + 0x128)) continue;
+        if (trace && s_n.fetch_add(1) < 6)
+            std::fprintf(stderr, "[port-net] list entry %u: +6C=%u +D0=%u +D4=%u +D8=%u +DC=%u +100=%u +104=%u\n", i,
+                         vm_read32(e + 0x6C), vm_read32(e + 0xD0), vm_read32(e + 0xD4), vm_read32(e + 0xD8),
+                         vm_read32(e + 0xDC), vm_read32(e + 0x100), vm_read32(e + 0x104));
+        if (!vm_read32(e + 0xD0)) vm_write32(e + 0xD0, 1);
+        if (!vm_read32(e + 0x100)) vm_write32(e + 0x100, 1);
+    }
+    return 0;
+}
+#endif /* PORT_V106 */
+
 /* Called on every vblank (main.cpp). The "logged into OTG" byte is also read in line by other
  * logic (JoinGameLogic: func_0039D6C8, whose PostStats step after a race then neither succeeds
  * nor fails: "Quitting the race!!! because im stuck???" and both players leave the game instead
@@ -573,9 +608,9 @@ void port_net_tick(void)
     if (!lan_otg_ok()) return;
     const uint32_t ngd = s_net_global_data.load(std::memory_order_relaxed);
     if (!ngd) return;
-    if ((int32_t)vm_read32(ngd + 0xC40) < 0 && !vm_read8(0x014D9F66u)) {
+    if ((int32_t)vm_read32(ngd + T_NGD_NETMODE) < 0 && !vm_read8(T_OTG_LOGGED_ADDR)) {
         static std::atomic<int> s_n{0};
         if (s_n.fetch_add(1) < 8) std::fprintf(stderr, "[port-net] \"logged into OTG\" set (LAN mode)\n");
-        vm_write8(0x014D9F66u, 1);
+        vm_write8(T_OTG_LOGGED_ADDR, 1);
     }
 }

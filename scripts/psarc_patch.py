@@ -1,6 +1,7 @@
 """Build port/psarc_patches.bin: replacement files for ms3.psarc, applied by the port at read time.
 
     python scripts/psarc_patch.py [--overlay port/psarc_overlay] [--out port/psarc_patches.bin] [--check]
+    python scripts/psarc_patch.py --v106 [--check]       (1.06 build: ms3.psarc + ms3patchv0101..0106.psarc)
 
 Two sources of replacements:
   - port/psarc_edits.json (the one in use, holds no game data): a list of
@@ -93,6 +94,9 @@ def best_deflate(raw):
     return best
 
 
+HDD_USRDIR = 'F:/Jeux/PS3/_recomp/BCES00484/dev_hdd0/game/BCES00484/USRDIR/'
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--overlay', default=os.path.join(PORT, 'psarc_overlay'))
@@ -100,10 +104,27 @@ def main():
     ap.add_argument('--out', default=os.path.join(PORT, 'psarc_patches.bin'))
     ap.add_argument('--archive', default=ARCHIVE)
     ap.add_argument('--check', action='store_true')
+    ap.add_argument('--v106', action='store_true',
+                    help='1.06 build: the title mounts ms3.psarc and ms3patchv0101..0106.psarc (the HDD copies in '
+                         + HDD_USRDIR + '); an edited file is patched in the LAST archive that holds it; '
+                         'writes port/psarc_patches_106.bin (PSPATCH2: one patch list per archive)')
     a = ap.parse_args()
-    arc = Psarc(a.archive)
-    index = {nm.lower(): i for i, nm in enumerate(arc.names)}
-    ranges, failed = [], False
+    archives = [('ms3.psarc', Psarc(a.archive))]
+    if a.v106:
+        for k in range(1, 7):
+            archives.append(('ms3patchv%04d.psarc' % (100 + k), Psarc(HDD_USRDIR + 'ms3patchv%04d.psarc' % (100 + k))))
+        if a.out == os.path.join(PORT, 'psarc_patches.bin'):
+            a.out = os.path.join(PORT, 'psarc_patches_106.bin')
+    indexes = [{nm.lower(): i for i, nm in enumerate(ar.names)} for _, ar in archives]
+
+    def winner(name):
+        """(archive name, Psarc, entry index) of the last archive holding `name`, or None."""
+        for (an, ar), ix in reversed(list(zip(archives, indexes))):
+            if name.lower() in ix:
+                return an, ar, ix[name.lower()]
+        return None
+    per_arc = {an: [] for an, _ in archives}
+    failed = False
     todo = []                                   # (archive name, new content)
     for root, dirs, files in os.walk(a.overlay):
         for fn in sorted(files):
@@ -111,11 +132,11 @@ def main():
             todo.append(('/' + os.path.relpath(full, a.overlay).replace(os.sep, '/'), open(full, 'rb').read()))
     if os.path.exists(a.edits):
         for item in json.load(open(a.edits, encoding='utf-8')):
-            i = index.get(item['file'].lower())
-            if i is None:
+            w = winner(item['file'])
+            if w is None:
                 todo.append((item['file'], None))
                 continue
-            data = arc.read(i)
+            data = w[1].read(w[2])
             if item.get('strip_comments'):      # room for the edits: XML comments carry nothing
                 data = re.sub(rb'<!--.*?-->', b'', data, flags=re.S)
             for old, new in item['replace']:
@@ -126,11 +147,13 @@ def main():
             todo.append((item['file'], data))
     for name, new in todo:
         if True:
-            i = index.get(name.lower())
-            if i is None or new is None:
+            w = winner(name)
+            if w is None or new is None:
                 print(f'{name}: NOT IN THE ARCHIVE')
                 failed = True
                 continue
+            an, arc, i = w
+            print(f'[{an}]', end=' ')
             blk, size, off = arc.ent[i]
             old_nb, room = arc.nblocks(size), arc.stored_len(i)
             nb = arc.nblocks(len(new))
@@ -162,14 +185,24 @@ def main():
                 got = arc.read(i, {'ent': (blk, len(new), off), 'bsz': bsz, 'ranges': mine})
                 print('   check:', 'OK' if got == new else 'MISMATCH')
                 failed |= got != new
-            ranges += mine
+            per_arc[an] += mine
     if failed:
         sys.exit('nothing written')
     with open(a.out, 'wb') as f:
-        f.write(b'PSPATCH1' + struct.pack('<I', len(ranges)))
-        for off, b in ranges:
-            f.write(struct.pack('<QI', off, len(b)) + b)
-    print(f'{a.out}: {len(ranges)} ranges, {sum(len(b) for _, b in ranges)} bytes')
+        if not a.v106:
+            ranges = per_arc['ms3.psarc']
+            f.write(b'PSPATCH1' + struct.pack('<I', len(ranges)))
+            for off, b in ranges:
+                f.write(struct.pack('<QI', off, len(b)) + b)
+        else:
+            used = [(an, rg) for an, rg in per_arc.items() if rg]
+            f.write(b'PSPATCH2' + struct.pack('<I', len(used)))
+            for an, rg in used:
+                nb = an.encode()
+                f.write(struct.pack('<B', len(nb)) + nb + struct.pack('<I', len(rg)))
+                for off, b in rg:
+                    f.write(struct.pack('<QI', off, len(b)) + b)
+    print(f'{a.out}: ' + ', '.join(f'{an}: {len(rg)} ranges' for an, rg in per_arc.items() if rg))
 
 
 if __name__ == '__main__':

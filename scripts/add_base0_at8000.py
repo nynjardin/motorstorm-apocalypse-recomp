@@ -21,8 +21,8 @@ sys.path.insert(0, HERE)
 import relift_jobmods as R   # noqa: E402
 
 L, SPU, MAN, ELF, BASE = R.L, R.SPU, R.MAN, R.ELF, R.BASE
-REG = os.path.join(SPU, 'jobmods_register.c')
-BAK = 'E:/ms_perf/jobmods_register.c.before_b8000'
+REG = R.REG
+BAK = 'E:/ms_perf/jobmods_register%s.c.before_b8000' % R.SUF
 NEW_BASE = 0x8000
 HOSTS = {'jobmod_135114c81d32_e0030'}     # stays at 0x4000 only (it is the one that loads the others)
 FIRST_ID = 260                            # image ids of the 0x8000 lifts (0x4000 lifts: 200..248)

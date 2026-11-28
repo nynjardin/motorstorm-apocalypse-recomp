@@ -2,7 +2,7 @@
 zero bytes = the module's BSS/buffers). A DMA GET into a buffer inside the registered span drops
 the lifted residency mid-job (spu_overlay_note_get), which desynchronises the host frames."""
 import re, shutil, os
-p = r'I:\Projets\Recomp\MotorStorm\port\spu\jobmods_register.c'
+p = r'I:\Projets\Recomp\MotorStorm\port\spu\jobmods_register%s.c' % ('' if __import__('os').environ.get('MS_TITLE', 'BCES00484') == 'BCES00484' else '_106')
 bak = r'E:\jobmods_register.c.bak'
 if not os.path.exists(bak):
     shutil.copy(p, bak)

@@ -20,10 +20,12 @@ import json, os, re, shutil, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 SPU = os.path.join(ROOT, 'port', 'spu')
-REG = os.path.join(SPU, 'jobmods_register.c')
-MAN = os.path.join(SPU, 'jobmods_manifest.json')
-ELF = os.path.join(ROOT, 'game', 'BCES00484', 'EBOOT.elf')
-BAK = r'E:\jobmods_register.c.before_extend.bak'
+TITLE = os.environ.get('MS_TITLE', 'BCES00484')       # BCES00484_106: the 1.06 modules (_106 files)
+SUF = '' if TITLE == 'BCES00484' else '_106'
+REG = os.path.join(SPU, 'jobmods_register%s.c' % SUF)
+MAN = os.path.join(SPU, 'jobmods_manifest%s.json' % SUF)
+ELF = os.path.join(ROOT, 'game', TITLE, 'EBOOT.elf')
+BAK = r'E:\jobmods_register%s.c.before_extend.bak' % SUF
 TOOLS = os.path.normpath(os.path.join(ROOT, '..', 'ps3recomp', 'tools'))
 sys.path.insert(0, TOOLS)
 sys.path.insert(0, HERE)

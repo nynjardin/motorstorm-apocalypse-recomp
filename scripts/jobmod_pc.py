@@ -14,12 +14,13 @@ SPU = os.path.join(HERE, '..', 'port', 'spu')
 
 
 def load():
-    man = json.load(open(os.path.join(SPU, 'jobmods_manifest.json')))
+    SUF = '' if os.environ.get('MS_TITLE', 'BCES00484') == 'BCES00484' else '_106'   # MS_TITLE=BCES00484_106
+    man = json.load(open(os.path.join(SPU, 'jobmods_manifest%s.json' % SUF)))
     by_ea = {}
     for m in man:
         for ea in m.get('eas', [m['ea']]):
             by_ea[ea] = m
-    reg = open(os.path.join(SPU, 'jobmods_register.c'), encoding='latin-1').read()
+    reg = open(os.path.join(SPU, 'jobmods_register%s.c' % SUF), encoding='latin-1').read()
     jobs = []
     for ea, jid in re.findall(r'verified_region\(0x([0-9A-F]+)u, 0x4000u, jm_span\([^)]*\), (\d+),', reg):
         m = by_ea.get(int(ea, 16))

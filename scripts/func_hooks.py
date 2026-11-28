@@ -20,8 +20,10 @@ rewritten byte for byte around the inserted line.
 import glob, os, re, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RECOMP = os.path.normpath(os.path.join(HERE, '..', 'work', 'BCES00484', 'recomp'))
-LIST = os.path.normpath(os.path.join(HERE, '..', 'port', 'func_hooks.txt'))
+# MS_TITLE=BCES00484_106 : the 1.06 lift (work/BCES00484_106/recomp) with port/func_hooks_106.txt
+TITLE = os.environ.get('MS_TITLE', 'BCES00484')
+RECOMP = os.path.normpath(os.path.join(HERE, '..', 'work', TITLE, 'recomp'))
+LIST = os.path.normpath(os.path.join(HERE, '..', 'port', 'func_hooks.txt' if TITLE == 'BCES00484' else 'func_hooks_106.txt'))
 MARK = b'/* PORT_HOOK */'
 
 

@@ -26,6 +26,10 @@
 !/port/config.toml
 !/port/func_hooks.txt
 !/port/psarc_edits.json
+# The 1.06 update build (PORT_V106): its addresses / offsets (title_addrs.h), hook list and menu edits.
+!/port/*.h
+!/port/func_hooks_106.txt
+!/port/psarc_edits_106.json
 !/port/duck_fp.hlsl
 
 /scripts/__pycache__/

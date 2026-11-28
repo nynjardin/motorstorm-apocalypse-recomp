@@ -12,6 +12,7 @@
  */
 
 #include "ppu_recomp.h"     /* ppu_context, vm_read32 / vm_write32 */
+#include "title_addrs.h"   /* addresses of the disc EBOOT or of the 1.06 one (PORT_V106) */
 
 #include <direct.h>     /* _mkdir */
 
@@ -659,6 +660,22 @@ static void port_cellNetCtlGetState(ppu_context* c)
     c->gpr[3] = 0;
 }
 
+/* 1.06 EBOOT: its start-up code loads 35 firmware modules and keeps each success in a 34-entry
+ * table (the "unload at exit" list); the 35th write lands on the stdio lock word (0x0132B6D8) and
+ * the first printf spins for ever. The real firmware refuses module 0x0054 (not a module it has),
+ * so the table never overflows there: refuse it the same way. Every other id goes to the toolkit. */
+extern "C" int32_t cellSysmoduleLoadModule(uint16_t id);
+static void port_cellSysmoduleLoadModule(ppu_context* c)
+{
+    const uint16_t id = (uint16_t)c->gpr[3];
+    if (id == 0x0054) {
+        std::fprintf(stderr, "[port] cellSysmoduleLoadModule(0x0054) -> ERROR_UNKNOWN (1.06 start-up table)\n");
+        c->gpr[3] = 0x80012002u;   /* CELL_SYSMODULE_ERROR_UNKNOWN */
+        return;
+    }
+    c->gpr[3] = (uint32_t)cellSysmoduleLoadModule(id);
+}
+
 /* ---------------------------------------------------------------------------------------------
  * EDGE MLAA skipped (PORT_SKIP_MLAA, default 1; 0 = run it).
  * The title post-processes its frame with Edge's SPU MLAA (edgepost_mlaa_handler.cpp: prepare
@@ -679,7 +696,7 @@ extern "C" int32_t _cellSpursSendSignal(void* taskset, uint32_t taskId);
 static void port_cellSpursSendSignal(ppu_context* c)
 {
     static const int s_skip = [] { const char* e = std::getenv("PORT_SKIP_MLAA"); return !(e && e[0] == '0'); }();
-    if (s_skip && (uint32_t)c->lr == 0x00857F9Cu) {
+    if (s_skip && (uint32_t)c->lr == T_SPURS_KICK_LR) {
         const uint32_t mlaa = (uint32_t)c->gpr[31];
         vm_write32(mlaa + 0x2C, 1);
         if (const uint32_t label = vm_read32(mlaa + 0x28)) vm_write32(label, 0);
@@ -782,5 +799,6 @@ extern "C" void port_register_hle_overrides(void)
     ps3_hle_register_ctx(0x88BE4799u, "cellFontRenderCharGlyphImage",   cellFontRenderCharGlyphImage_port);
     ps3_hle_register_ctx(0x8B5551A4u, "cellAdecOpenEx",                 cellAdecOpenEx);
     ps3_hle_register_ctx(0x1E7BFF94u, "cellSysCacheMount",              cellSysCacheMount);
+    ps3_hle_register_ctx(0x32267A31u, "cellSysmoduleLoadModule",        port_cellSysmoduleLoadModule);
     std::printf("[port] HLE overrides registered (17)\n");
 }

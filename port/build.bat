@@ -11,6 +11,17 @@ rem   PORT_BUILD_DIR=E:\ms_perf\lr\build   PORT_RECOMP_DIR=E:/ms_perf/lr/recomp_
 if defined PORT_BUILD_DIR set "BUILD=%PORT_BUILD_DIR%"
 set "RECOMP=I:/Projets/Recomp/MotorStorm/work/BCES00484/recomp"
 if defined PORT_RECOMP_DIR set "RECOMP=%PORT_RECOMP_DIR%"
+rem PORT_V106=1: the 1.06 update EBOOT (docs/PROGRESS.md "Port de l'EBOOT 1.06"): own build tree on E:, own lift,
+rem same sources (addresses in title_addrs.h), with the disc PGO profile (see below). Run with PORT_V106=1 run.bat.
+set "V106OPT="
+if defined PORT_V106 (
+  if not defined PORT_BUILD_DIR set "BUILD=E:\ms_perf\build106_pgo"
+  if not defined PORT_RECOMP_DIR set "RECOMP=I:/Projets/Recomp/MotorStorm/work/BCES00484_106/recomp"
+  rem The disc profile is used (PORT_PGO=0 = off): the runtime / SPU / backend code is shared, the lifted game code of
+  rem the profile does not match and is compiled without it. 2026-11-28 uncapped, bridge, 2 pairs: presentation 43 -> 45.7,
+  rem driving 32.1 / 33.6 -> 33.6 / 34.0 FPS. Tree: E:\ms_perf\build106_pgo (the old no-PGO tree E:\ms_perf\build106 is kept).
+  set "V106OPT=-DPORT_V106=ON"
+)
 
 rem Profile-guided optimisation: when a merged profile exists (made by build_pgo.bat gen + a race +
 rem build_pgo.bat merge, see docs/perf.md), the build uses it: +1 FPS in the race (2026-11-23).
@@ -49,7 +60,7 @@ if not exist "%BUILD%\CMakeCache.txt" (
     -DPS3RECOMP_FFMPEG_RUNTIME=ON "-DPS3RECOMP_FFMPEG_INCLUDE_DIR=E:/ms_perf/ffmpeg/ffmpeg-n8.1-latest-win64-lgpl-shared-8.1/include" ^
     -DRECOMP_DIR=%RECOMP% ^
     -DPython3_EXECUTABLE=I:/Projets/Recomp/.venv/Scripts/python.exe ^
-    -DPORT_ENABLE_SPU=ON -DPORT_SPU_INPUTS= %FFOPT% "%FXOPT%" "-DPORT_SPU_FLOAT_EXACT_DEFS=%PORT_SPU_FLOAT_EXACT_DEFS%" || exit /b 1
+    -DPORT_ENABLE_SPU=ON -DPORT_SPU_INPUTS= %V106OPT% %FFOPT% "%FXOPT%" "-DPORT_SPU_FLOAT_EXACT_DEFS=%PORT_SPU_FLOAT_EXACT_DEFS%" || exit /b 1
 rem SPU: lifted images live in port\spu\ (built by tools\build_spu_workloads.py --images
 rem work\BCES00484\spu_images, which includes the raw WWS job PM wrapped as pm_wwsjob.elf).
 )

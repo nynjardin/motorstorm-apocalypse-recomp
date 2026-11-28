@@ -4,6 +4,12 @@ setlocal
 rem PS3_VFS_ROOT set before the call = another game folder (a test copy: scripts\vfs_link_copy.ps1).
 if not defined PS3_VFS_ROOT set "PS3_VFS_ROOT=F:\Jeux\PS3\MotorStorm - Apocalypse (Europe) (En,Fr,De,Es,It,Nl,Pt,Sv,No,Da,Fi,Ko,Pl,Ru) (v02.00)"
 set "ELF=%~dp0..\game\BCES00484\EBOOT.elf"
+rem PORT_V106=1: the 1.06 update EBOOT (build with PORT_V106=1 port\build.bat; docs\PROGRESS.md "Port de l'EBOOT 1.06").
+if defined PORT_V106 set "ELF=%~dp0..\game\BCES00484_106\EBOOT.elf"
+rem 1.06: BootCheck must report the PATCH attribute or the game never mounts ms3patchv01xx (toolkit patch #75).
+if defined PORT_V106 if not defined PS3_GAME_ATTRIBUTES set "PS3_GAME_ATTRIBUTES=1"
+rem 1.06 has PlayStation Move / Eye code: with the toolkit's virtual camera attached it loops on cellCameraOpenEx and the boot stalls.
+if defined PORT_V106 if not defined PS3_CAMERA set "PS3_CAMERA=0"
 rem Firmware files the title reads (Multistream's flashMP3.pic): the user's RPCS3 install.
 set "PS3_DEV_FLASH=I:\Projets\Recomp\tools\rpcs3\dev_flash"
 rem Multistream loads codec code (flashMP3.pic...) into SPU local store at run time and calls it:
@@ -104,12 +110,21 @@ rem left a stray gamedata\ there. Pinned next to this script, wherever the launc
 if not defined PS3_GAMEDATA_ROOT set "PS3_GAMEDATA_ROOT=%~dp0gamedata"
 if not exist "%PS3_HDD0_ROOT%" mkdir "%PS3_HDD0_ROOT%"
 if not exist "%PS3_HDD1_ROOT%" mkdir "%PS3_HDD1_ROOT%"
+rem The 1.06 patch archives (ms3patchv0101-0106) live in BLES00000\USRDIR only while the 1.06 build runs: the disc
+rem EBOOT opens ms3patchv0101/0102 from there too and then loads for ever (found 2026-11-28, Festival loading).
+set "P106=%PS3_HDD0_ROOT%\game\BLES00000\_patches106"
+set "PUSR=%PS3_HDD0_ROOT%\game\BLES00000\USRDIR"
+if defined PORT_V106 if exist "%P106%\ms3patchv01*.psarc" move /Y "%P106%\ms3patchv01*.psarc" "%PUSR%\" >nul
+if not defined PORT_V106 if exist "%PUSR%\ms3patchv01*.psarc" move /Y "%PUSR%\ms3patchv01*.psarc" "%P106%\" >nul
 rem Files of ms3.psarc replaced at read time (menus: docs\reseau.md), the disc is not touched:
 rem the patch list made by scripts\psarc_patch.py, when it exists. PORT_PSARC_PATCHES=0 = off.
 if not defined PORT_PSARC_PATCHES if exist "%~dp0psarc_patches.bin" set "PORT_PSARC_PATCHES=%~dp0psarc_patches.bin"
+if defined PORT_V106 if "%PORT_PSARC_PATCHES%"=="%~dp0psarc_patches.bin" set "PORT_PSARC_PATCHES=%~dp0psarc_patches_106.bin"
 rem PORT_EXE = another build of the port (an A/B exe, the PGO builds on E:: port\build_pgo.bat).
 if not defined PORT_EXE set "PORT_EXE=%~dp0build\MotorStormApocalypse.exe"
+if defined PORT_V106 if "%PORT_EXE%"=="%~dp0build\MotorStormApocalypse.exe" set "PORT_EXE=E:\ms_perf\build106_pgo\MotorStormApocalypse.exe"
 rem PORT_RUN_LOG = another log file (a second instance on the same machine: run_lan.bat).
 if not defined PORT_RUN_LOG set "PORT_RUN_LOG=%~dp0run.log"
+if defined PORT_V106 if "%PORT_RUN_LOG%"=="%~dp0run.log" set "PORT_RUN_LOG=%~dp0run106.log"
 "%PORT_EXE%" "%ELF%" "%PS3_VFS_ROOT%" %* > "%PORT_RUN_LOG%" 2>&1
 echo exit code %ERRORLEVEL% (log: %PORT_RUN_LOG%)

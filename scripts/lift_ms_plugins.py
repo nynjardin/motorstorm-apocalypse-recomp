@@ -48,6 +48,9 @@ BANKS = [
 # thread, itself at 95 % of a core: the stuttering race music). Found with SPU_GETLOG /
 # SPU_GETLOG_WORD and scripts/ms_ls_snap.py (journal 2026-11-23). The generated C holds
 # firmware bytes: local only, like everything derived from the firmware.
+V106_PATCH = {"ms_bankA": [(0x2D4B, 0x37), (0x2D57, 0x39), (0x2D58, 0x39)],
+              "ms_bankB": [(0x46B, 0x37), (0x477, 0x39), (0x478, 0x39), (0x14EB, 0x37), (0x14F7, 0x39), (0x14F8, 0x39)]}
+
 MP3_PIC = os.path.join(ROOT, "..", "tools", "rpcs3", "dev_flash", "sys", "external", "flashMP3.pic")
 MP3 = dict(name="ms_mp3", ea=0x193C7600, lsa=0x1A900, img=32,
            file_off=0x100, vaddr=0x80, seg_size=0xFF10, text_end=0x9430, span=0x10000)
@@ -113,6 +116,7 @@ def main():
     out.append(" * run time into LS 0x%05X by SPU image 7. See that script. */" % LOAD_LSA)
     out.append("#include <stdint.h>")
     out.append("#include <stddef.h>")
+    out.append("#include <string.h>")
     out.append("")
     out.append("typedef struct spu_context spu_context;")
     out.append("typedef struct { uint32_t lsa; uint32_t size; const uint8_t* bytes; } spu_overlay_code_segment;")
@@ -167,7 +171,17 @@ def main():
     for name, ea, img, end, lsa, span, code_lsa in regs:
         out.append(f"    spu_begin_image({img}); {name}_spu_recomp_register();")
         out.append(f"    {{ static const spu_overlay_code_segment seg = {{ 0x{code_lsa:X}, 0x{end:X}, {name}_code }};")
-        out.append(f"      spu_overlay_register_verified_region(0x{ea:08X}u, 0x{lsa:X}, 0x{span:X}, {img}, &seg, 1); }}")
+        out.append(f"      spu_overlay_register_verified_region(0x{ea:08X}u, 0x{lsa:X}, 0x{span:X}, {img}, &seg, 1);")
+        # the 1.06 EBOOT: same code, heap 0x10A700 lower (found with SPU_DUMP_OVL; the MP3 buffer is flashMP3.pic);
+        # only the SDK version string inside the banks differs (350 / Rev 3420 -> 370 / Rev 3499), patched in a copy
+        # because the verification is byte for byte
+        out.append("#ifdef PORT_V106")
+        pats = " ".join("c[0x%X]=0x%02X;" % x for x in V106_PATCH.get(name, []))
+        out.append("      { static uint8_t c[0x%X]; static spu_overlay_code_segment s106;" % end)
+        out.append("        memcpy(c, %s_code, sizeof c); %s s106.lsa = seg.lsa; s106.size = seg.size; s106.bytes = c;" % (name, pats))
+        out.append(f"        spu_overlay_register_verified_region(0x{ea - 0x10A700:08X}u, 0x{lsa:X}, 0x{span:X}, {img}, &s106, 1); }}")
+        out.append("#endif")
+        out.append("    }")
     out.append("    spu_begin_image(0);")
     out.append("}")
     out.append("")

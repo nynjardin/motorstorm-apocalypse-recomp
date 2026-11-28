@@ -12,8 +12,9 @@ with no direct caller is reached through a pointer (virtual method, callback).
 import glob, os, re, struct, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ELF = os.path.normpath(os.path.join(HERE, '..', 'game', 'BCES00484', 'EBOOT.elf'))
-RECOMP = os.path.normpath(os.path.join(HERE, '..', 'work', 'BCES00484', 'recomp'))
+TITLE = os.environ.get('MS_TITLE', 'BCES00484')   # MS_TITLE=BCES00484_106 for the 1.06 build
+ELF = os.path.normpath(os.path.join(HERE, '..', 'game', TITLE, 'EBOOT.elf'))
+RECOMP = os.path.normpath(os.path.join(HERE, '..', 'work', TITLE, 'recomp'))
 HI = re.compile(r'ctx->gpr\[(\d+)\] = \(int64_t\)\(int32_t\)\(\(uint32_t\)0x([0-9A-F]+) << 16\);')
 
 

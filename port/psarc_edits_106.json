@@ -1,0 +1,78 @@
+[
+  {
+    "file": "/ui/fe/multiplayer.xml",
+    "strip_comments": true,
+    "replace": [
+      [
+        "<Focus once=\"true\" target=\"GamesList\" />",
+        "<Focus once=\"true\" target=\"GamesList\" /><Case once=\"true\"><Event screen=\"CustomGamesList\" message=\"GOSTD\" /></Case><Case when_finished=\"true\"><Event screen=\"CustomGamesList\" message=\"GONONE\" /></Case>"
+      ],
+      [
+        "value=\"$IfInt((OTG/PartyJoined==true and OTG/PartyLeader==false) or (OTGConnectionLogic/Connected==false) or (NetGlobalData/UserAddRemoveInProgress==true) or (NetGlobalData/IsConnectedToMedius==false), 3, 0)\"",
+        "value=\"$IfInt((OTG/PartyJoined==true and OTG/PartyLeader==false) or (NetGlobalData/UserAddRemoveInProgress==true), 3, 0)\""
+      ],
+      [
+        "visible=\"$(OTGConnectionLogic/Connected==false) or (NetGlobalData/UserAddRemoveInProgress==true) or (NetGlobalData/IsConnectedToMedius==false)\"",
+        "visible=\"$(NetGlobalData/UserAddRemoveInProgress==true)\""
+      ]
+    ]
+  },
+  {
+    "file": "/ui/fe/wreckreation_results.xml",
+    "strip_comments": true,
+    "replace": [
+      [
+        "<Event screen=\"XPAccumulator\" message=\"AddBonusPot\" />",
+        "<Event screen=\"XPAccumulator\" message=\"AddBonusPot\" /><DataBinding databinding=\"UserManager/NeedSave\" value=\"true\" />"
+      ],
+      [
+        "<Event screen=\"SplitScreenXPResults\" message=\"AddBonusPot0\" />",
+        "<Event screen=\"SplitScreenXPResults\" message=\"AddBonusPot0\" /><DataBinding databinding=\"UserManager/NeedSave\" value=\"true\" />"
+      ],
+      [
+        "<Event screen=\"SplitScreenXPResults\" message=\"AddBonusPot1\" />",
+        "<Event screen=\"SplitScreenXPResults\" message=\"AddBonusPot1\" /><DataBinding databinding=\"UserManager/NeedSave\" value=\"true\" />"
+      ]
+    ]
+  },
+  {
+    "file": "/ui/be/hud_definition.xml",
+    "strip_comments": true,
+    "replace": [
+      [
+        "<DataBinding databinding=\"JoinGameLogic/Finish/Execute\" value=\"true\" />",
+        "<DataBinding databinding=\"RaceResultsLogic/StatsPosted\" value=\"true\" />"
+      ]
+    ]
+  },
+  {
+    "file": "/ui/fe/boot_sequence.xml",
+    "strip_comments": true,
+    "replace": [
+      [
+        "<Flow delay=\"10\" target=\"LegalInformation\" />",
+        "<Flow delay=\"10\" target=\"LegalInformation\" /><Flow button=\"start\" target=\"TitleScreen\" />"
+      ],
+      [
+        "<Flow macro=\"five second delay\" target=\"AutoSaveWarning\" />",
+        "<Flow macro=\"five second delay\" target=\"AutoSaveWarning\" /><Flow button=\"start\" target=\"TitleScreen\" />"
+      ],
+      [
+        "<Text lams=\"BootSequence::AutosaveWarning\" x=\"320px\" width=\"640px\" y=\"182px\" multiline=\"true\" css_style=\"FontConBl_26pt_C_align_White\" line_spacing=\"5px\" />",
+        "<Text lams=\"BootSequence::AutosaveWarning\" x=\"320px\" width=\"640px\" y=\"182px\" multiline=\"true\" css_style=\"FontConBl_26pt_C_align_White\" line_spacing=\"5px\" /><Flow button=\"start\" target=\"TitleScreen\" />"
+      ],
+      [
+        "<Flow macro=\"five second delay\" target=\"EvolutionStudios\" />",
+        "<Flow macro=\"five second delay\" target=\"EvolutionStudios\" /><Flow button=\"start\" target=\"TitleScreen\" />"
+      ],
+      [
+        "<Flow manual=\"true\" name=\"LogoVideoFinished\" target=\"VidIntermediaryScreen\" />",
+        "<Flow manual=\"true\" name=\"LogoVideoFinished\" target=\"VidIntermediaryScreen\" /><Flow button=\"start\" target=\"TitleScreen\" />"
+      ],
+      [
+        "<Flow button=\"accept\" target=\"TitleScreen\" />",
+        "<Flow button=\"accept\" target=\"TitleScreen\" /><Flow button=\"start\" target=\"TitleScreen\" />"
+      ]
+    ]
+  }
+]

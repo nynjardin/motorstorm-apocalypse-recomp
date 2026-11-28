@@ -25,8 +25,8 @@ sys.path.insert(0, HERE)
 import relift_jobmods as R   # noqa: E402  (chdir to the toolkit tools, imports lift_jobmods as L)
 
 L, SPU, MAN, ELF, BASE = R.L, R.SPU, R.MAN, R.ELF, R.BASE
-REG = os.path.join(SPU, 'jobmods_register.c')
-BAK = 'E:/ms_perf/jobmods_register.c.before_base0'
+REG = R.REG
+BAK = 'E:/ms_perf/jobmods_register%s.c.before_base0' % R.SUF
 
 
 def fmt_array(name, data, nl):

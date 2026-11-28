@@ -160,7 +160,15 @@ elseif(PORT_ENABLE_SPU)
              "${PS3RECOMP_DIR}/runtime/spu/spu_dispatch_mt.c")
         # Generated beside the lift; each is present only once its generator
         # has been run, so each is included only if it is actually here.
-        foreach(gen IN ITEMS spu_workloads.c jobmods_register.c taskset_policy_bytes.c)
+        # The 1.06 EBOOT has its own job modules (recompiled): jobmods_register_106.c (scripts/jobmods_tu_106.py).
+        if(PORT_V106)
+            set(JOBMODS_TU jobmods_register_106.c)
+            set(WORKLOADS_TU spu_workloads_106.c)    # 5 of the 25 SPU images are different in 1.06
+        else()
+            set(JOBMODS_TU jobmods_register.c)
+            set(WORKLOADS_TU spu_workloads.c)
+        endif()
+        foreach(gen IN ITEMS ${WORKLOADS_TU} ${JOBMODS_TU} taskset_policy_bytes.c)
             if(EXISTS "${SPU_DIR}/${gen}")
                 list(APPEND SPU_SOURCES "${SPU_DIR}/${gen}")
             else()
@@ -195,6 +203,7 @@ add_executable(${PROJECT_NAME}
     hle_overrides.cpp
     port_hwwatch.cpp    # PORT_HWWATCH / PORT_LISTDUMP debugging aids
     net_hooks.cpp       # entry hooks on the title's online code (scripts/func_hooks.py, docs/reseau.md)
+    diag_hooks.cpp      # 1.06 only: PORT_DIAG_FENCE logging hooks (docs/PROGRESS.md)
     movie_trace.cpp     # MOVIE_TRACE: in-memory trace of the title's movie player (docs/hle.md "Real movies")
     psarc_patch.cpp     # replacement of files inside ms3.psarc at read time (scripts/psarc_patch.py)
     portable.cpp        # no argument = the exe at the root of the game folder (docs/lanceur.md)
@@ -206,6 +215,11 @@ add_executable(${PROJECT_NAME}
     ${SPU_SOURCES}
     ${LIBSRE_SOURCES}
 )
+# The 1.06 update EBOOT (work/BCES00484_106): other addresses and structure offsets, port/title_addrs.h.
+option(PORT_V106 "Build for the 1.06 update EBOOT instead of the disc one" OFF)
+if(PORT_V106)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE PORT_V106=1)
+endif()
 # Linker map (host RVA -> symbol) for the PS3_SAMPLE "[samp] rva" histogram. No code change.
 if(MSVC OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     target_link_options(${PROJECT_NAME} PRIVATE "/MAP:${CMAKE_BINARY_DIR}/MotorStormApocalypse.map")

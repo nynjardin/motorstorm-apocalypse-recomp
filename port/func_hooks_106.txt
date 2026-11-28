@@ -1,0 +1,14 @@
+# Entry hooks of the 1.06 build (MS_TITLE=BCES00484_106 python scripts/func_hooks.py). Addresses of the 1.06
+# EBOOT; port/title_addrs.h renames the port_hook_<disc address> definitions. Same purposes as func_hooks.txt.
+0x00AE0E68   # the title's debug printf (empty stub in retail): PORT_GAME_LOG
+0x0037CB28   # NetGlobalData::SetLanOrWan
+0x002C90FC   # CommunityAction::Succeeded
+0x002C910C   # CommunityAction::HasError
+0x003A7CA0   # "logged into OTG"
+0x0029D6D8   # XpManager::AddChips
+0x00639FDC   # engine fence Wait   (port/diag_hooks.cpp, PORT_DIAG_FENCE)
+0x0063A3C4   # engine fence Signal
+0x0063C3E4   # engine Event constructor
+0x00E9B9DC   # engine Event Wait/Signal: Signal without the guard (PORT_FENCE_FIX, port/diag_hooks.cpp)
+0x003E17A8   # games list expiry pass: "Invalidating Game Entry No Players" (port/net_hooks.cpp, PORT_LAN_LIST_FIX)
+# not mapped yet: save writer (PORT_SAVE_TRACE), Text::SetText, GameSearch row, network library record (LAN game list)
