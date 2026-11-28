@@ -4,19 +4,27 @@
 
 # MotorStorm: Apocalypse on PC, by static recompilation
 
-A native Windows port of **MotorStorm: Apocalypse** (PS3, BCES00484 v02.00). The game's PowerPC
-code is translated to C++ with [ps3recomp](https://github.com/sp00nznet/ps3recomp), then compiled
-with a runtime that stands in for the console (Direct3D 12, sound, controller, local network).
+A native Windows port of **MotorStorm: Apocalypse** (PS3, BCES00484 v02.00, and its 1.06 update). The
+game's PowerPC code is translated to C++ with [ps3recomp](https://github.com/sp00nznet/ps3recomp),
+then compiled with a runtime that stands in for the console (Direct3D 12, sound, controller, local
+network).
 
 **This repository contains neither the game nor the firmware.** It only holds our own work: the
 port's sources, the launcher, the scripts and our changes to ps3recomp. You need your own disc of
 the game and the firmware of your own console to use it.
 
-## Status (27 November 2026)
+## Status (28 November 2026)
 
 - The game boots, the menus work, and races run to the end with a correct picture on the two
   tracks tried so far (the bridge and the pier).
+- **The 1.06 update is the version the project is moving to** (more circuits and modes, "Alcatraz",
+  special events). It is a second translation of the game (the update's executable is a different
+  build, not a patch of the disc's), built with `PORT_V106=1`; it runs at the same speed as the disc
+  version, and the local-network multiplayer works on it (tried with two instances on one machine).
+  The disc-only build stays in the tree for comparisons.
 - A steady 30 frames per second (the game's own cap) on an i7-10700F and an RTX 4070 SUPER.
+- The lens flares are dimmed (they were far too bright): `FLARE_SCALE`, 0.2 by default (toolkit
+  patch #77).
 - Renders at 720p by default; true 1080p and 1440p are available (`PORT_RES=1920x1080`).
 - Sound and music work.
 - The game's movies play, picture and sound, when FFmpeg's DLLs are beside the exe (see
@@ -70,6 +78,20 @@ The steps, in order:
 5. **Running it**: `port\run.bat` (development), or the player's folder with the launcher
    (`launcher\build.bat`, then `scripts\deploy_game.ps1`).
 
+**The 1.06 update build** (the one the launcher and `scripts\deploy_game.ps1` now put in the player's
+folder) needs, besides the above:
+
+- the six update packages of the game (`DATA000-005.PKG`, in the disc's `INSDIR`), installed once
+  with RPCS3, which gives `EBOOT.BIN` (1.06) and `ms3patchv0101..0106.psarc`;
+- its own translation: decrypt that `EBOOT.BIN` into `game\BCES00484_106\`, then
+  `python scripts\lift_title.py BCES00484_106 --spu`, `MS_TITLE=BCES00484_106 python
+  scripts\func_hooks.py`, and the SPU job modules chain of `scripts\jobmods_v106.py`;
+- `scripts\psarc_patch.py --v106 --edits port\psarc_edits_106.json` for the menu changes;
+- `PORT_V106=1 port\build.bat configure`, then `PORT_V106=1 port\build.bat` (own build tree, the
+  profile-guided build of the disc is reused for the shared code), and `PORT_V106=1 port\run.bat`
+  (`port\run_lan_106.bat` for multiplayer).
+
+The addresses and structure offsets that differ from the disc build are in `port\title_addrs.h`.
 Many scripts and the `.bat` files still carry the paths of the machine the project was born on
 (`I:\Projets\Recomp`, `F:\Jeux\PS3`, `E:\ms_perf`): adapt them to yours.
 

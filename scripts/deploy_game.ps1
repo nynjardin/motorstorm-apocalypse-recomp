@@ -2,14 +2,21 @@
 #   <game>\MotorStormApocalypse.exe, <game>\Launcher.exe     at the root, beside PS3_GAME
 #   <game>\recomp\                                           everything else (see below)
 #   scripts\deploy_game.ps1 [-GameDir <root>] [-Exe <game exe>] [-Launcher <Launcher.exe>] [-NoData]
+# Since 2026-11-28 the game folder holds the 1.06 UPDATE build of the game (the version kept at the end):
+# the exe of E:\ms_perf\build106_pgo (port\build.bat with PORT_V106=1), recomp\EBOOT.elf = the decrypted
+# EBOOT of the update (game\BCES00484_106), recomp\psarc_patches.bin = port\psarc_patches_106.bin and the six
+# data archives of the update in recomp\dev_hdd0\game\BLES00000\USRDIR (from the RPCS3 install).
 # The dump itself (PS3_GAME, PS3_DISC.SFB) is never touched and nothing is ever deleted.
+#   - before the first 1.06 deployment what it replaces (exe, launcher, EBOOT.elf, psarc_patches.bin) is
+#     copied to E:\ms_perf\exe\deployed_before_106\ (only while that folder holds no file yet);
 #   - our build outputs are replaced by the current ones: the two exes, the three Visual C++ runtime
 #     DLLs beside them (msvcp140, vcruntime140, vcruntime140_1), recomp\psarc_patches.bin,
-#     recomp\libsre_image.bin, recomp\EBOOT.elf (the decrypted EBOOT of game\BCES00484);
+#     recomp\libsre_image.bin, recomp\EBOOT.elf;
 #   - what belongs to the player is copied ONLY WHEN ABSENT, from where port\run.bat keeps it:
 #     recomp\save (port\gamedata), recomp\dev_hdd0 and dev_hdd1 (the title's HDD cache, 1.2 GB:
-#     without the copy the first boot rebuilds it), recomp\shader_cache, recomp\dev_flash
-#     (firmware files of the RPCS3 install). -NoData skips this second group.
+#     without the copy the first boot rebuilds it; the update's archives are left out of that copy and
+#     put separately), recomp\shader_cache, recomp\dev_flash (firmware files of the RPCS3 install).
+#     -NoData skips this second group (the six archives are always checked).
 # The folder then runs from anywhere (every path is relative to the exe): copy it whole to
 # another PC. NOT to be published: the game exe is the game's own code recompiled, EBOOT.elf,
 # dev_flash and libsre_image.bin come from the disc and the firmware.
@@ -21,7 +28,12 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
-if (-not $Exe) { $Exe = Join-Path $repo 'port\build\MotorStormApocalypse.exe' }
+if (-not $Exe) { $Exe = 'E:\ms_perf\build106_pgo\MotorStormApocalypse.exe' }
+# The update's pieces must all exist: a 1.06 EBOOT with a disc exe (or the reverse) does not run.
+$elf106 = Join-Path $repo 'game\BCES00484_106\EBOOT.elf'
+$patches106 = Join-Path $repo 'port\psarc_patches_106.bin'
+$rpcs3Update = Join-Path (Split-Path $repo -Parent) 'tools\rpcs3\dev_hdd0\game\BCES00484\USRDIR'
+foreach ($p in $Exe, $elf106, $patches106) { if (-not (Test-Path -LiteralPath $p)) { throw "missing, cannot deploy the 1.06 build: $p" } }
 if (-not (Test-Path -LiteralPath (Join-Path $GameDir 'PS3_GAME\USRDIR\ms3.psarc'))) { throw "not a MotorStorm: Apocalypse folder: $GameDir" }
 # "Launcher" is a common process name: only one that runs from this game folder counts (Lanceur.exe
 # is the launcher's name of before 2026-11-25, left in place by this script: nothing is deleted).
@@ -36,17 +48,28 @@ function Put([string]$from, [string]$to) {             # our outputs: replaced
     Copy-Item -LiteralPath $from -Destination $to -Force
     Write-Host ("  {0}  ({1:N1} MB)" -f $to.Substring($GameDir.Length + 1), ((Get-Item -LiteralPath $to).Length / 1MB))
 }
-function Seed([string]$from, [string]$to) {            # the player's: only when absent
+function Seed([string]$from, [string]$to, [string[]]$exclude = @()) {            # the player's: only when absent
     $name = $to.Substring($GameDir.Length + 1)
     if (Test-Path -LiteralPath $to) { Write-Host "  kept as it is: $name"; return }
     if (-not (Test-Path -LiteralPath $from)) { Write-Host "  no source, the game will create it: $name"; return }
-    robocopy $from $to /E /NFL /NDL /NJH /NJS /NP | Out-Null
+    $xf = @(); if ($exclude.Count) { $xf = @('/XF') + $exclude }
+    robocopy $from $to /E /NFL /NDL /NJH /NJS /NP @xf | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "robocopy $from -> $to failed ($LASTEXITCODE)" }
     $m = Get-ChildItem -LiteralPath $to -Recurse -File | Measure-Object Length -Sum
     Write-Host ("  {0}  ({1} files, {2:N0} MB)" -f $name, $m.Count, ($m.Sum / 1MB))
 }
 
 Write-Host "game folder: $GameDir"
+# First 1.06 deployment: keep what is replaced (the previous, disc-version setup).
+$bak = 'E:\ms_perf\exe\deployed_before_106'
+if (-not (Test-Path -LiteralPath $bak) -or -not (Get-ChildItem -LiteralPath $bak -File -ErrorAction SilentlyContinue)) {
+    New-Item -ItemType Directory -Force -Path $bak | Out-Null
+    foreach ($f in 'MotorStormApocalypse.exe', 'Launcher.exe', 'recomp\EBOOT.elf', 'recomp\psarc_patches.bin') {
+        $src = Join-Path $GameDir $f
+        if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $bak (Split-Path $f -Leaf)) }
+    }
+    Write-Host "  previous exe / launcher / EBOOT.elf / psarc_patches.bin kept in $bak"
+}
 Put $Exe (Join-Path $GameDir 'MotorStormApocalypse.exe')
 Put $Launcher (Join-Path $GameDir 'Launcher.exe')
 # The Visual C++ runtime the game exe imports, beside it: the folder then starts on a PC that has no
@@ -62,15 +85,29 @@ $ffbin = 'E:\ms_perf\ffmpeg\ffmpeg-n8.1-latest-win64-lgpl-shared-8.1\bin'
 foreach ($dll in 'avcodec-62.dll', 'avutil-60.dll', 'swresample-6.dll') {
     Put (Join-Path $ffbin $dll) (Join-Path $GameDir $dll)
 }
-Put (Join-Path $repo 'game\BCES00484\EBOOT.elf') (Join-Path $data 'EBOOT.elf')
-Put (Join-Path $repo 'port\psarc_patches.bin') (Join-Path $data 'psarc_patches.bin')
+Put $elf106 (Join-Path $data 'EBOOT.elf')
+Put $patches106 (Join-Path $data 'psarc_patches.bin')
 Put (Join-Path $repo 'work\firmware\libsre\libsre_image.bin') (Join-Path $data 'libsre_image.bin')
 if (-not $NoData) {
     Seed (Join-Path $repo 'port\gamedata') (Join-Path $data 'save')
-    Seed 'F:\Jeux\PS3\_recomp\BCES00484\dev_hdd0' (Join-Path $data 'dev_hdd0')
+    Seed 'F:\Jeux\PS3\_recomp\BCES00484\dev_hdd0' (Join-Path $data 'dev_hdd0') @('ms3patchv01*.psarc')
     Seed 'F:\Jeux\PS3\_recomp\BCES00484\dev_hdd1' (Join-Path $data 'dev_hdd1')
     Seed 'F:\Jeux\PS3\_recomp\BCES00484\shader_cache' (Join-Path $data 'shader_cache')
     Seed (Join-Path (Split-Path $repo -Parent) 'tools\rpcs3\dev_flash') (Join-Path $data 'dev_flash')
+}
+# The update's six data archives (610 MB), where the title looks for them; only when absent. After the Seed
+# above (creating the folder first would make Seed think dev_hdd0 is already there). The DISC build of the game
+# must never find them there (it loads for ever): this folder holds the 1.06 build only.
+$usrdir = Join-Path $data 'dev_hdd0\game\BLES00000\USRDIR'
+New-Item -ItemType Directory -Force -Path $usrdir | Out-Null
+foreach ($n in 1..6) {
+    $name = 'ms3patchv010{0}.psarc' -f $n
+    $dst = Join-Path $usrdir $name
+    if (Test-Path -LiteralPath $dst) { Write-Host "  kept as it is: recomp\dev_hdd0\game\BLES00000\USRDIR\$name"; continue }
+    $src = Join-Path $rpcs3Update $name
+    if (-not (Test-Path -LiteralPath $src)) { throw "the update's archive is missing: $src" }
+    Copy-Item -LiteralPath $src -Destination $dst
+    Write-Host ("  recomp\dev_hdd0\game\BLES00000\USRDIR\{0}  ({1:N0} MB)" -f $name, ((Get-Item -LiteralPath $dst).Length / 1MB))
 }
 $readme = @(
     'MotorStorm: Apocalypse, PC version (static recompilation)',
@@ -85,9 +122,13 @@ $readme = @(
     '  shader_cache\         shaders already compiled (same)',
     '  run.log               what the game wrote the last time it ran (run.prev.log: the time before)',
     '  lanceur.json, settings.ini   the settings chosen in the launcher',
-    '  EBOOT.elf             the game''s decrypted executable (rpcs3.exe --decrypt PS3_GAME\USRDIR\EBOOT.BIN)',
+    '  EBOOT.elf             the decrypted executable of the game''s 1.06 update (rpcs3.exe --decrypt on its EBOOT.BIN)',
+    '  dev_hdd0\game\BLES00000\USRDIR\ms3patchv0101..0106.psarc   the data of the 1.06 update (more circuits and modes)',
     '  dev_flash\, libsre_image.bin   files of the PS3 firmware',
     '  psarc_patches.bin     game menus changed as they are read (LAN games, results)',
+    '',
+    'This folder holds the game in its 1.06 version (the disc plus the update): everybody who plays together on a',
+    'network should have the same build.',
     '',
     'Every path is relative: the game folder can be moved or copied as it is to another PC.',
     'Do not distribute: MotorStormApocalypse.exe (the game''s code, recompiled), EBOOT.elf, dev_flash, libsre_image.bin.',
@@ -106,9 +147,13 @@ $readme = @(
     '  shader_cache\         shaders deja compiles (idem)',
     '  run.log               ce que le jeu a ecrit a son dernier lancement (run.prev.log : celui d''avant)',
     '  lanceur.json, settings.ini   les reglages choisis dans le lanceur',
-    '  EBOOT.elf             l''executable du jeu dechiffre (rpcs3.exe --decrypt PS3_GAME\USRDIR\EBOOT.BIN)',
+    '  EBOOT.elf             l''executable dechiffre de la mise a jour 1.06 du jeu (rpcs3.exe --decrypt sur son EBOOT.BIN)',
+    '  dev_hdd0\game\BLES00000\USRDIR\ms3patchv0101..0106.psarc   les donnees de la mise a jour 1.06 (plus de circuits et de modes)',
     '  dev_flash\, libsre_image.bin   fichiers du firmware de la PS3',
     '  psarc_patches.bin     menus du jeu modifies a la lecture (parties LAN, resultats)',
+    '',
+    'Ce dossier contient le jeu en version 1.06 (le disque plus la mise a jour) : tous ceux qui jouent ensemble',
+    'en reseau doivent avoir la meme version.',
     '',
     'Tout est en chemins relatifs : le dossier du jeu peut etre deplace ou copie tel quel sur un autre PC.',
     'A ne pas diffuser : MotorStormApocalypse.exe (le code du jeu recompile), EBOOT.elf, dev_flash, libsre_image.bin.'

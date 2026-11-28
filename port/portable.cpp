@@ -3,7 +3,10 @@
  *   <game>\PS3_GAME\...              the dump, read in place, never written
  *   <game>\MotorStormApocalypse.exe  this exe, started WITHOUT ARGUMENTS (double click, Launcher.exe)
  *   <game>\Launcher.exe               the launcher (launcher\, docs\lanceur.md)
- *   <game>\recomp\EBOOT.elf          the decrypted EBOOT (rpcs3.exe --decrypt PS3_GAME\USRDIR\EBOOT.BIN)
+ *   <game>\recomp\EBOOT.elf          the decrypted EBOOT (rpcs3.exe --decrypt PS3_GAME\USRDIR\EBOOT.BIN); in the
+ *                                    PORT_V106 build (the one the player's folder holds since 2026-11-28) the EBOOT of
+ *                                    the 1.06 update, and the update's data archives are required:
+ *   <game>\recomp\dev_hdd0\game\BLES00000\USRDIR\ms3patchv0101..0106.psarc   (PORT_V106 build only)
  *   <game>\recomp\settings.ini       NAME=value lines written by the launcher (optional)
  *   <game>\recomp\psarc_patches.bin, libsre_image.bin, dev_flash\   what port\run.bat points at
  *   <game>\recomp\save\, dev_hdd0\, dev_hdd1\, shader_cache\, run.log   what the game writes
@@ -139,6 +142,17 @@ struct Portable {
                  L"recomp\\EBOOT.elf est introuvable.\n\nC'est l'exécutable du jeu déchiffré : "
                  L"rpcs3.exe --decrypt PS3_GAME\\USRDIR\\EBOOT.BIN, puis copier le fichier obtenu "
                  L"sous le nom recomp\\EBOOT.elf.");
+#ifdef PORT_V106
+        /* The 1.06 update's data archives, where the title looks for them (the toolkit's default title id). The disc
+         * build must NOT find them there (it loads for ever), the 1.06 build cannot start without them. */
+        if (!exists(data + "\\dev_hdd0\\game\\BLES00000\\USRDIR\\ms3patchv0106.psarc"))
+            fail(L"The 1.06 update's archives were not found.\n\nms3patchv0101.psarc ... ms3patchv0106.psarc must be in "
+                 L"recomp\\dev_hdd0\\game\\BLES00000\\USRDIR (they come from the update's packages).\n\n"
+                 L"————\n\n"
+                 L"Les archives de la mise à jour 1.06 sont introuvables.\n\nms3patchv0101.psarc ... "
+                 L"ms3patchv0106.psarc doivent être dans recomp\\dev_hdd0\\game\\BLES00000\\USRDIR "
+                 L"(elles viennent des paquets de la mise à jour).");
+#endif
 
         read_settings(data + "\\settings.ini");
 
@@ -174,6 +188,12 @@ struct Portable {
         env_default("RSX_SHADER_CACHE", data + "\\shader_cache");
         env_default("PS3_DEV_FLASH", data + "\\dev_flash");
         if (exists(data + "\\psarc_patches.bin")) env_default("PORT_PSARC_PATCHES", data + "\\psarc_patches.bin");
+#ifdef PORT_V106
+        /* What port\run.bat sets for the 1.06 build: BootCheck must report the PATCH attribute or the update's archives
+         * are never mounted (toolkit patch #75); the virtual camera makes the 1.06 boot stall (PlayStation Move / Eye code). */
+        env_default("PS3_GAME_ATTRIBUTES", "1");
+        env_default("PS3_CAMERA", "0");
+#endif
         if (exists(data + "\\libsre_image.bin")) env_default("PORT_LIBSRE_IMAGE", data + "\\libsre_image.bin");
 
         /* The title's LAN mode (port\run_lan.bat, docs\reseau.md). */

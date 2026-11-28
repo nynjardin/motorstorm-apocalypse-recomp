@@ -351,8 +351,20 @@ fn checks(folder: &Path, fr: bool) -> Vec<Check> {
         "recomp\\EBOOT.elf",
         tr(
             fr,
-            "The game's decrypted executable: rpcs3.exe --decrypt PS3_GAME\\USRDIR\\EBOOT.BIN, then copy it here.",
-            "L'exécutable du jeu déchiffré : rpcs3.exe --decrypt PS3_GAME\\USRDIR\\EBOOT.BIN, puis le copier ici.",
+            "The decrypted executable of the game's 1.06 update (the one the game folder is built for): rpcs3.exe --decrypt on the EBOOT.BIN of the update, then copy it here.",
+            "L'exécutable déchiffré de la mise à jour 1.06 du jeu (celle pour laquelle le dossier est construit) : rpcs3.exe --decrypt sur l'EBOOT.BIN de la mise à jour, puis le copier ici.",
+        ),
+    );
+    // The update's six data archives, where the title looks for them (port/portable.cpp checks the last one).
+    let usrdir = data.join("dev_hdd0").join("game").join("BLES00000").join("USRDIR");
+    add(
+        (1..=6).all(|n| has(usrdir.join(format!("ms3patchv010{n}.psarc")))),
+        true,
+        "recomp\\dev_hdd0\\game\\BLES00000\\USRDIR\\ms3patchv0101..0106.psarc",
+        tr(
+            fr,
+            "The six data archives of the 1.06 update (from its packages): without them the game does not start.",
+            "Les six archives de données de la mise à jour 1.06 (issues de ses paquets) : sans elles le jeu ne démarre pas.",
         ),
     );
     add(
