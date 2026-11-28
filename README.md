@@ -31,7 +31,10 @@ the game and the firmware of your own console to use it.
   "Movies, and a smaller copy of the game"); without them every movie is a short clip.
 - Multiplayer on a local network with no server, using the LAN mode the game already contains;
   played between two PCs, and tried with up to four instances on one machine.
-- Known defect: dark squares around the vehicles.
+- The dark squares that used to surround the vehicles at the start of a race are gone: each vehicle's
+  contact shadow is a 3D texture that the renderer sampled as a flat one (toolkit patch #67).
+- Known defect: in the game's photo mode, the "Preview" button does nothing (the same on the disc
+  build).
 
 ## What is in the repository
 
